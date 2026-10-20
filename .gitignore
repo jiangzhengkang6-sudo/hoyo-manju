@@ -1,0 +1,40 @@
+# 依赖与虚拟环境
+node_modules/
+.deps/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 构建产物
+frontend/dist/
+backend/build/
+*.egg-info/
+
+# 运行时数据（数据库 / 对象存储 / checkpoint / 渲染产物）
+backend/data/
+*.db
+*.db-journal
+*.sqlite3
+
+# 临时与调试
+.tmp/
+.tmp-alembic/
+*.log
+
+# 环境变量（只提交 .env.example）
+.env
+.env.local
+.env.*.local
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 前端测试覆盖率报告
+frontend/coverage/

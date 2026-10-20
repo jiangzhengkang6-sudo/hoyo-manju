@@ -1,0 +1,39 @@
+# 构建上下文排除项（backend/ 与 frontend/ 镜像共用）
+
+# 依赖
+**/node_modules
+.deps
+.venv
+venv
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+
+# 构建产物
+frontend/dist
+
+# 运行时数据（数据库、对象存储、渲染产物、checkpoint）
+backend/data
+**/*.db
+**/*.db-journal
+**/*.sqlite3
+
+# 临时与日志
+.tmp
+.tmp-alembic
+**/*.log
+
+# 环境变量与本地配置
+.env
+.env.local
+.env.*.local
+
+# 编辑器 / 系统
+.git
+.gitignore
+.vscode
+.idea
+.DS_Store
+Thumbs.db

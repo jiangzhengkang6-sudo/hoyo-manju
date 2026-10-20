@@ -1,0 +1,108 @@
+# hoyo漫剧 · MVP 部署编排
+#
+# 单机一键起：docker compose up -d --build
+#   1) api      : FastAPI（含内嵌 worker，单机默认并发 3）
+#   2) worker   : 独立 worker 进程（可选，横向扩容时把 api 的 ENABLE_EMBEDDED_WORKER 关掉）
+#   3) web      : Nginx 托管前端静态资源，并把 /api 反代到 api
+#   4) minio    : 可选对象存储（STORAGE_BACKEND=s3 时启用）
+#   5) redis    : 可选，用于多实例部署时的外部队列
+#
+# 只想跑 MVP 闭环：docker compose up -d --build api web
+# 本地不装 Docker 也可以直接跑：见 README.md「本地开发」。
+
+name: hoyomanju
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: hoyomanju-api:0.1.0-mvp
+    container_name: hoyomanju-api
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      APP_ENV: prod
+      DATABASE_URL: sqlite:////data/hoyomanju.db
+      STORAGE_BACKEND: local
+      STORAGE_DIR: /data/storage
+      CHECKPOINT_DB: /data/checkpoints.db
+      FFMPEG_BIN: /usr/bin/ffmpeg
+    volumes:
+      - hoyomanju-data:/data
+    ports:
+      - "18437:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  worker:
+    image: hoyomanju-api:0.1.0-mvp
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: hoyomanju-worker
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      APP_ENV: prod
+      DATABASE_URL: sqlite:////data/hoyomanju.db
+      STORAGE_BACKEND: local
+      STORAGE_DIR: /data/storage
+      CHECKPOINT_DB: /data/checkpoints.db
+      FFMPEG_BIN: /usr/bin/ffmpeg
+      # 独立 worker 模式：API 进程不再内嵌 worker
+      ENABLE_EMBEDDED_WORKER: "false"
+    command: ["python", "-m", "app.worker.runner"]
+    volumes:
+      - hoyomanju-data:/data
+    profiles: ["workers"]
+
+  web:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    image: hoyomanju-web:0.1.0-mvp
+    container_name: hoyomanju-web
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "15731:80"
+
+  redis:
+    image: redis:7-alpine
+    container_name: hoyomanju-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - hoyomanju-redis:/data
+    profiles: ["infra"]
+
+  minio:
+    image: minio/minio:latest
+    container_name: hoyomanju-minio
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - hoyomanju-minio:/data
+    profiles: ["infra"]
+
+volumes:
+  hoyomanju-data:
+  hoyomanju-redis:
+  hoyomanju-minio:

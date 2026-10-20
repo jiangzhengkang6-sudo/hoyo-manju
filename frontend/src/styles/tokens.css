@@ -1,0 +1,77 @@
+/**
+ * hoyo漫剧 设计令牌（深色创作工具风格）
+ * 全部主题变量集中在此，组件内只引用 var(--xxx)，不写字面色值。
+ */
+
+:root {
+  color-scheme: dark;
+
+  /* ---- 底色层级：底 → 面板 → 浮层 ---- */
+  --bg-0: #0b0d12;
+  --bg-1: #12151c;
+  --panel: #171a22;
+  --panel-2: #1c2029;
+  --panel-3: #232835;
+  --panel-hover: #1f2430;
+
+  /* ---- 描边 ---- */
+  --line: rgba(255, 255, 255, 0.08);
+  --line-strong: rgba(255, 255, 255, 0.16);
+  --line-accent: rgba(56, 189, 248, 0.35);
+
+  /* ---- 文本 ---- */
+  --text-0: #e9edf5;
+  --text-1: #a8b2c2;
+  --text-2: #6d7789;
+  --text-3: #4b5364;
+
+  /* ---- 强调色：青蓝 → 紫 ---- */
+  --accent: #38bdf8;
+  --accent-2: #a78bfa;
+  --accent-grad: linear-gradient(118deg, #38bdf8 0%, #a78bfa 100%);
+  --accent-soft: rgba(56, 189, 248, 0.13);
+  --accent-2-soft: rgba(167, 139, 250, 0.13);
+
+  /* ---- 语义色 ---- */
+  --ok: #34d399;
+  --ok-soft: rgba(52, 211, 153, 0.13);
+  --warn: #fbbf24;
+  --warn-soft: rgba(251, 191, 36, 0.13);
+  --danger: #f87171;
+  --danger-soft: rgba(248, 113, 113, 0.13);
+  --info: #38bdf8;
+  --info-soft: rgba(56, 189, 248, 0.13);
+  --neutral-soft: rgba(255, 255, 255, 0.06);
+
+  /* ---- 字体 ---- */
+  --font-ui: system-ui, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue', sans-serif;
+  --font-mono: 'JetBrains Mono', 'Cascadia Mono', ui-monospace, 'SF Mono', Consolas, monospace;
+
+  /* ---- 圆角 ---- */
+  --radius-xs: 6px;
+  --radius-sm: 8px;
+  --radius: 12px;
+  --radius-lg: 16px;
+  --radius-pill: 999px;
+
+  /* ---- 尺寸 ---- */
+  --nav-w: 228px;
+  --topbar-h: 60px;
+  --stagebar-h: 52px;
+  --gap: 16px;
+  --gap-sm: 10px;
+  --gap-lg: 24px;
+
+  /* ---- 动效 ---- */
+  --dur: 120ms;
+  --dur-slow: 220ms;
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* ---- 阴影（细描边优先，阴影只做层次暗示） ---- */
+  --shadow-1: 0 1px 0 rgba(255, 255, 255, 0.03), 0 8px 24px rgba(0, 0, 0, 0.32);
+  --shadow-2: 0 18px 48px rgba(0, 0, 0, 0.5);
+
+  /* ---- 9:16 竖屏缩略图 ---- */
+  --portrait-w: 148px;
+  --portrait-h: 263px;
+}

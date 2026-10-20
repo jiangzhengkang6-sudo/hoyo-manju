@@ -1,0 +1,43 @@
+# hoyo漫剧 后端依赖（MVP）
+# 安装：pip install -r requirements.txt
+# 说明：MVP 默认使用 SQLite + 本地磁盘存储 + FFmpeg，无需额外中间件即可跑通闭环。
+
+# --- Web 框架 ---
+fastapi==0.143.0
+uvicorn[standard]==0.54.0
+python-multipart==0.0.32
+
+# --- 数据校验与配置 ---
+pydantic==2.14.0
+pydantic-settings==2.15.0
+
+# --- 数据层 ---
+SQLAlchemy==2.1.4
+alembic==1.20.0
+aiosqlite==0.22.1
+greenlet==3.5.6
+
+# --- 工作流编排（人类确认门控 / checkpoint 续跑） ---
+langgraph==1.2.14
+langgraph-checkpoint-sqlite==3.1.1
+
+# --- HTTP / 供应商适配 ---
+httpx==0.28.1
+
+# --- 媒体处理 ---
+pillow==12.3.0
+imageio-ffmpeg==0.6.0
+
+# --- 存储与队列（可选：仅 S3 / Redis 后端需要） ---
+boto3==1.43.111
+redis==8.1.0
+
+# --- 安全 ---
+cryptography==50.0.2
+
+# --- 流式输出（SSE） ---
+sse-starlette==3.5.0
+
+# --- 测试 ---
+pytest==9.1.1
+pytest-asyncio==1.4.0

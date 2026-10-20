@@ -1,0 +1,27 @@
+# 统一换行处理：源码按文本归一化，媒体文件保持二进制原样
+* text=auto
+
+*.py   text
+*.ts   text
+*.vue  text
+*.js   text
+*.json text
+*.md   text
+*.yml  text
+*.yaml text
+*.toml text
+*.sh   text
+*.ps1  text
+
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.webp binary
+*.gif  binary
+*.mp3  binary
+*.wav  binary
+*.m4a  binary
+*.mp4  binary
+*.mov  binary
+*.zip  binary
+*.db   binary
