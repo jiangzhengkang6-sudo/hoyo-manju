@@ -84,8 +84,25 @@ def test_repeated_idempotent_submit_returns_same_job(
             assert first.json()["id"] == second.json()["id"]
 
 
+def _save_story(client: TestClient, episode_id: str) -> None:
+    """生成剧本前必须先保存输入。
+
+    后端现在会拒绝空故事（模型拿到空文本会凭空编一部与用户创意无关的剧本，
+    详见 tests/test_empty_story_guard.py）。
+    """
+    resp = client.post(
+        f"/api/v1/episodes/{episode_id}/story",
+        json={
+            "input_type": "idea",
+            "source_text": "林晚在雨夜收到一封匿名信，循线找到失踪三年的沈砚，两人在天台对峙。",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+
+
 def test_job_state_is_persisted_for_recovery(client: TestClient, episode: dict) -> None:
     """§15.2：任务状态落在数据库里，重启 worker 后仍可查询（不是内存态）。"""
+    _save_story(client, episode["id"])
     client.post(
         f"/api/v1/episodes/{episode['id']}/story/generate",
         params={"shot_count": 3},
@@ -103,6 +120,7 @@ def test_job_state_is_persisted_for_recovery(client: TestClient, episode: dict) 
 
 def test_workflow_run_is_queryable_after_restart(client: TestClient, episode: dict) -> None:
     """§15.2：工作流 run 由 checkpointer 持有，重启后仍能读到（不是内存态）。"""
+    _save_story(client, episode["id"])
     started = client.post(f"/api/v1/episodes/{episode['id']}/workflow/start", json={})
     assert started.status_code in (200, 409), started.text
     run = client.get(f"/api/v1/episodes/{episode['id']}/workflow").json()
@@ -137,6 +155,7 @@ def test_schema_error_falls_back_without_crashing(
 
     monkeypatch.setitem(executor_service._HANDLERS, "STORY_GENERATION", _raise_schema)
 
+    _save_story(client, episode["id"])
     resp = client.post(
         f"/api/v1/episodes/{episode['id']}/story/generate", params={"shot_count": 3}
     )
@@ -166,6 +185,7 @@ def test_provider_timeout_is_reported(client: TestClient, episode: dict, monkeyp
         raise ProviderTimeout("供应商响应超时", details={"provider": "mock"})
 
     monkeypatch.setitem(executor_service._HANDLERS, "STORY_GENERATION", _raise_timeout)
+    _save_story(client, episode["id"])
     resp = client.post(f"/api/v1/episodes/{episode['id']}/story/generate")
     job = client.get(f"/api/v1/jobs/{resp.json()['id']}").json()
     if job["status"] == "FAILED":
@@ -357,6 +377,7 @@ def test_request_validation_uses_uniform_body(client: TestClient, episode: dict)
 
 def test_provider_calls_record_model_and_cost(client: TestClient, episode: dict) -> None:
     """§15.4：每次供应商调用都要记录 provider / model / 成本，可回溯。"""
+    _save_story(client, episode["id"])
     resp = client.post(
         f"/api/v1/episodes/{episode['id']}/story/generate", params={"shot_count": 3}
     )

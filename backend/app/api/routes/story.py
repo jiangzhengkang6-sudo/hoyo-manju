@@ -19,7 +19,7 @@ from app.api.deps import (
     shots_of,
 )
 from app.core.config import settings
-from app.core.errors import NotFound, SchemaValidationFailed, StateConflict
+from app.core.errors import AppError, NotFound, SchemaValidationFailed, StateConflict
 from app.db.models import (
     AssetStatus,
     EpisodeStage,
@@ -212,6 +212,12 @@ def generate_story(episode_id: str, session: SessionDep, shot_count: int | None 
     episode = get_episode(session, episode_id=episode_id)
     document = _latest_document(session, episode.id)
     source_text = document.source_text if document else ""
+    # 没有输入就不能生成：模型拿到空文本会自由发挥，产出一部与用户创意
+    # 毫无关系的剧本（线上实测：用户输入未落库时，剧本凭空变成便利店故事）。
+    if not (source_text or "").strip():
+        raise AppError(
+            "故事内容为空，无法生成剧本：请先填写一句话创意或故事文本并保存"
+        )
     safety_agent.assert_input_allowed(session, source_text, episode_id=episode.id)
     version = (document.version if document else 0) + 1
     job = jobs_service.create_job(

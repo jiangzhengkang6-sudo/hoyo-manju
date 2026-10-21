@@ -284,8 +284,41 @@ async function runJob(runner: () => Promise<Job>, label: string): Promise<void> 
   }
 }
 
+/**
+ * 生成前把「屏幕上这份文本」落到服务器。
+ *
+ * 之前这里直接调生成接口，依赖自动保存先跑完：用户输入后立刻点「生成剧本」时，
+ * 保存防抖还没触发，后端读到的仍是上一次（甚至空的）内容 —— 结果是模型
+ * 拿着空文本自由发挥，产出与用户创意毫无关系的剧本。
+ * 返回 false 表示没同步成功，调用方应中止生成，而不是拿旧内容硬跑。
+ */
+async function syncStoryText(): Promise<boolean> {
+  const text = storyText.value
+  if (!episodeId.value || !text.trim()) return false
+  if (text === (story.value?.source_text ?? '')) return true
+  try {
+    const doc = await storyApi.save(episodeId.value, {
+      input_type: inputType.value,
+      source_text: text,
+    })
+    story.value = doc
+    clearDraft(episodeId.value, 'story-text')
+    draftNotice.value = ''
+    void loadVersions()
+    return true
+  } catch {
+    return false
+  }
+}
+
 function generateScript(): Promise<void> {
-  return runJob(() => storyApi.generate(episodeId.value), '剧本生成')
+  return runJob(async () => {
+    if (!(await syncStoryText())) {
+      toast.warn('无法生成剧本', '故事内容未能保存到服务器，请检查网络后重试')
+      throw new Error('story text not synced')
+    }
+    return storyApi.generate(episodeId.value)
+  }, '剧本生成')
 }
 
 async function analyzeStory(): Promise<void> {
@@ -294,6 +327,8 @@ async function analyzeStory(): Promise<void> {
   if (busy.value) return
   busy.value = true
   try {
+    // 同「生成剧本」：先把屏幕上的文本落库，避免分析的是上一次的内容
+    await syncStoryText()
     const result = await storyApi.analyze(episodeId.value)
     if (result.story) {
       story.value = result.story

@@ -137,6 +137,19 @@ def node_safety_check_input(state: WorkflowState) -> dict[str, Any]:
             .limit(1)
         )
         text = state.get("source_text") or (document.source_text if document else "")
+        # 空输入必须挡住：模型拿到空文本会自由发挥，生成一部与用户创意
+        # 完全无关的剧本（线上实测过，用户会以为系统在糊弄他）。
+        if not (text or "").strip():
+            episode.stage = EpisodeStage.BLOCKED.value
+            episode.stage_before_block = EpisodeStage.SCRIPT_REVIEW.value
+            episode.blocked_reason = "故事内容为空"
+            run.status = WorkflowStatus.BLOCKED.value
+            _log(session, run, "safety_check_input", "BLOCKED", started,
+                 "故事内容为空，无法生成剧本")
+            session.flush()
+            raise AppError(
+                "故事内容为空：请先在「故事与剧本」页填写一句话创意或故事文本并保存，再启动工作流"
+            )
         result = safety_agent.check_input(session, text, episode_id=episode.id)
         if not result["allowed"]:
             episode.stage = EpisodeStage.BLOCKED.value
