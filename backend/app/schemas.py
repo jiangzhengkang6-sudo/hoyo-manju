@@ -16,6 +16,105 @@ from app.core.config import settings
 
 CameraMovement = Literal["固定", "推", "拉", "摇", "移", "跟", "升降"]
 Composition = Literal["特写", "近景", "中景", "全景", "远景", "过肩", "俯拍", "仰拍"]
+
+#: 规范值元组（供归一化使用；顺序即「长值优先」匹配顺序）
+CAMERA_MOVEMENTS: tuple[str, ...] = ("升降", "固定", "推", "拉", "摇", "移", "跟")
+COMPOSITIONS: tuple[str, ...] = (
+    "特写", "近景", "中景", "全景", "远景", "过肩", "俯拍", "仰拍",
+)
+
+#: 大模型常见变体 → 规范值。真实 LLM 几乎不会严格照抄枚举，
+#: 直接严格校验会让整条剧本生成失败（实测 DeepSeek 会输出「推镜头」「pan」等）。
+CAMERA_ALIASES: dict[str, str] = {
+    # 固定
+    "静止": "固定", "不动": "固定", "定格": "固定", "锁镜": "固定",
+    "固定镜头": "固定", "固定机位": "固定", "static": "固定",
+    "fixed": "固定", "lock": "固定", "still": "固定",
+    # 推
+    "推镜": "推", "推近": "推", "前推": "推", "推进": "推", "推镜头": "推",
+    "推轨": "推", "zoom in": "推", "push in": "推", "dolly in": "推",
+    # 拉
+    "拉远": "拉", "后拉": "拉", "拉开": "拉", "拉镜头": "拉", "拉背": "拉",
+    "zoom out": "拉", "pull out": "拉", "dolly out": "拉",
+    # 摇
+    "摇镜": "摇", "摇摄": "摇", "横摇": "摇", "摇镜头": "摇", "甩镜": "摇",
+    "pan": "摇", "pan left": "摇", "pan right": "摇",
+    # 移
+    "移镜": "移", "横移": "移", "平移": "移", "移镜头": "移", "侧移": "移",
+    "track": "移", "tracking": "移", "truck": "移",
+    # 跟
+    "跟镜": "跟", "跟随": "跟", "跟拍": "跟", "跟镜头": "跟", "跟移": "跟",
+    "follow": "跟", "following": "跟",
+    # 升降
+    "升": "升降", "降": "升降", "上升": "升降", "下降": "升降",
+    "升降镜头": "升降", "摇臂": "升降", "crane": "升降",
+    "boom": "升降", "crane up": "升降", "crane down": "升降",
+}
+
+COMPOSITION_ALIASES: dict[str, str] = {
+    "大特写": "特写", "close-up": "特写", "closeup": "特写", "close up": "特写",
+    "特写镜头": "特写",
+    "中近景": "近景", "半身": "近景", "medium close": "近景",
+    "中景镜头": "中景", "medium shot": "中景", "medium": "中景",
+    "大全景": "全景", "广角": "全景", "wide": "全景", "full shot": "全景",
+    "远景镜头": "远景", "long shot": "远景",
+    "过肩镜头": "过肩", "over shoulder": "过肩", "over-the-shoulder": "过肩",
+    "俯视": "俯拍", "俯角": "俯拍", "高角度": "俯拍", "high angle": "俯拍",
+    "仰视": "仰角", "仰拍镜头": "仰拍", "低角度": "仰拍", "low angle": "仰拍",
+}
+
+
+def normalize_enum(
+    value: Any,
+    canon: tuple[str, ...],
+    aliases: dict[str, str],
+    default: str,
+) -> str:
+    """把大模型输出的枚举变体归一成规范值。
+
+    依次尝试：精确匹配 → 去空白/标点后匹配 → 别名表 → 包含规范值 → 默认值。
+    宁可归一化也不让整条剧本生成失败 —— 一个镜头运动写歪不该毁掉全部产出。
+    """
+    if value is None:
+        return default
+    raw = str(value).strip()
+    if not raw:
+        return default
+    if raw in canon:
+        return raw
+
+    compact = re.sub(r"[\s\-_/·、，,。.（）()【】\[\]]+", "", raw)
+    if compact in canon:
+        return compact
+    lowered = compact.lower()
+    for key, target in aliases.items():
+        if re.sub(r"[\s\-_/]+", "", key.lower()) in (lowered, compact.lower()):
+            return target
+
+    # 包含规范值：如「缓慢推近」含「推」、「固定机位」含「固定」
+    for token in canon:
+        if token in compact:
+            return token
+    # 英文别名做子串兜底
+    for key, target in aliases.items():
+        if re.sub(r"[\s\-_/]+", "", key.lower()) in lowered:
+            return target
+    return default
+
+
+def _match_known_name(raw: str, names: set[str]) -> str | None:
+    """把分镜里的角色引用宽松匹配到人物表的规范名。
+
+    `「林晚（女主）」` → `林晚`；对不上就返回 None（调用方会丢弃该引用）。
+    """
+    if not names:
+        return None
+    cleaned = re.sub(r"[（(【\[].*?[）)】\]]", "", raw).strip()
+    if cleaned in names:
+        return cleaned
+    candidates = [n for n in names if n and (n in cleaned or cleaned in n)]
+    return max(candidates, key=len) if candidates else None
+
 TimeOfDay = Literal["清晨", "白天", "黄昏", "夜晚", "深夜", "不限"]
 AssetKind = Literal["setting", "front", "half_body", "expression"]
 GateName = Literal[
@@ -177,6 +276,21 @@ class VideoParams(BaseModel):
     motion_strength: float = Field(default=0.4, ge=0.0, le=1.0)
     camera_movement: CameraMovement = "固定"
 
+    @field_validator("camera_movement", mode="before")
+    @classmethod
+    def _normalize_camera(cls, v: Any) -> Any:
+        return normalize_enum(v, CAMERA_MOVEMENTS, CAMERA_ALIASES, "固定")
+
+    @field_validator("motion_strength", mode="before")
+    @classmethod
+    def _clamp_motion(cls, v: Any) -> Any:
+        """大模型偶尔给 1.5 / 70 这类越界值，夹到 0~1 而不是整条失败。"""
+        try:
+            num = float(v)
+        except (TypeError, ValueError):
+            return v
+        return max(0.0, min(1.0, num))
+
 
 class TransitionSpec(BaseModel):
     """FR-061 转场：表示「从上一镜切入本镜」的方式与时长。
@@ -206,6 +320,20 @@ class ShotScript(BaseModel):
     #: FR-061 转场（从上一镜切入本镜）；`none` 表示硬切
     transition: TransitionSpec | None = None
     required: bool = True
+
+    @field_validator("camera_movement", mode="before")
+    @classmethod
+    def _normalize_camera(cls, v: Any) -> Any:
+        """把「推镜头」「pan」「固定机位」等变体归一成规范枚举。
+
+        真实 LLM 不会严格照抄枚举值；严格校验会让整条剧本生成失败。
+        """
+        return normalize_enum(v, CAMERA_MOVEMENTS, CAMERA_ALIASES, "固定")
+
+    @field_validator("composition", mode="before")
+    @classmethod
+    def _normalize_composition(cls, v: Any) -> Any:
+        return normalize_enum(v, COMPOSITIONS, COMPOSITION_ALIASES, "中景")
 
     @field_validator("duration_ms")
     @classmethod
@@ -247,9 +375,18 @@ class ScriptModel(BaseModel):
             )
         names = {c.name for c in self.story_bible.characters}
         for shot in self.shots:
-            unknown = [c for c in shot.characters if c not in names]
-            if unknown:
-                raise ValueError(f"镜 {shot.shot_no} 引用了人物表中不存在的角色：{unknown}")
+            # 真实 LLM 常把角色名写成「林晚（女主）」「记者林晚」，或干脆
+            # 引用了人物表里没登记的人。以前这里直接抛错，会让整条剧本生成失败。
+            # 现在做宽容匹配：能对上就纠正成规范名，对不上就丢弃该引用。
+            resolved: list[str] = []
+            for raw_name in shot.characters:
+                name = str(raw_name).strip()
+                if not name:
+                    continue
+                matched = name if name in names else _match_known_name(name, names)
+                if matched and matched not in resolved:
+                    resolved.append(matched)
+            shot.characters = resolved
         return self
 
     @property
