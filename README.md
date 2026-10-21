@@ -80,10 +80,16 @@ python -m pytest            # 9 项端到端验收测试
 
 ```powershell
 cd backend
-python scripts\smoke_http.py          # 完整闭环：6 门控 → 预览 → 成片 → 素材包（约 2 分钟）
-python scripts\smoke_sse.py           # SSE 实时推送 + Last-Event-ID 断线续传
-python scripts\check_session_commit.py # 回归：POST 返回 201 时事务必须已提交（0/10 延迟）
+python scripts\run_isolated.py scripts\smoke_http.py   # 完整闭环：6 门控 → 预览 → 成片 → 素材包（约 2 分钟）
+python scripts\run_isolated.py scripts\smoke_sse.py    # SSE 实时推送 + Last-Event-ID 断线续传
+python scripts\run_isolated.py scripts\check_p0_fixes.py
 ```
+
+> **务必用 `run_isolated.py` 跑核验脚本。** 它会起一个临时后端实例（独立 SQLite / 独立存储 /
+> 强制 Mock 供应商），跑完销毁。直接 `python scripts\smoke_http.py` 会打开发库里的服务，
+> 每跑一次就往库里塞一个新项目（`联调项目·夜行者`、`降级核验`…），几十次之后项目列表和
+> 资产库里全是重复条目，还会把 `cost_ledgers` 的配额计数刷高。
+> 若确实想对已启动的开发服务做联调，再显式传 URL：`python scripts\smoke_http.py http://127.0.0.1:18437`。
 
 `scripts/ui_smoke.py` 是真实浏览器冒烟（新建项目 → 新建剧集 → 保存故事 → 启动工作流 →
 门控确认），需要一个已开启 CDP 端口的 Chromium：`python scripts\ui_smoke.py <cdp_port>`。
