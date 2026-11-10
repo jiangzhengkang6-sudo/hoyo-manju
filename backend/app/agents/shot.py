@@ -1,4 +1,4 @@
-"""ShotAgent：拆解镜头、生成提示词与生成参数（FR-MVP-012/030/031）。"""
+"""ShotAgent：拆解镜头、生成提示词与生成参数（FR-012/030/031）。"""
 
 from __future__ import annotations
 

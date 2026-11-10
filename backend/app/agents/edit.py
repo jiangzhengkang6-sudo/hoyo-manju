@@ -1,4 +1,4 @@
-"""EditAgent：时间线、混音、字幕、合成与素材包（FR-MVP-060~064）。"""
+"""EditAgent：时间线、混音、字幕、合成与素材包（FR-060~064）。"""
 
 from __future__ import annotations
 
@@ -379,7 +379,7 @@ def build_timeline(session: Session, episode: Episode, *, only_ready: bool = Fal
 def validate_timeline(
     session: Session, episode: Episode, *, only_ready: bool = False
 ) -> dict[str, Any]:
-    """合成前校验，错误可定位到镜号与音轨（FR-MVP-060）。
+    """合成前校验，错误可定位到镜号与音轨（FR-060）。
 
     `only_ready=True` 只校验「已就绪」的那部分镜头：未就绪镜头直接从时间线
     剔除，对应的「缺画面 / 缺台词音频」就不再是错误——用于部分预览先看效果。
@@ -603,7 +603,7 @@ def validate_timeline(
 # --------------------------------------------------------------------------- #
 
 def generate_subtitles(session: Session, episode: Episode) -> list[SubtitleCue]:
-    """根据确认台词与实际音频生成可编辑字幕（FR-MVP-053）。
+    """根据确认台词与实际音频生成可编辑字幕（FR-053）。
 
     字幕有两个来源，按优先级取：
 

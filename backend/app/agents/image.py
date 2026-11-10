@@ -1,4 +1,4 @@
-"""ImageAgent：候选图生成与质量检查（FR-MVP-031/032/034）。"""
+"""ImageAgent：候选图生成与质量检查（FR-031/032/034）。"""
 
 from __future__ import annotations
 

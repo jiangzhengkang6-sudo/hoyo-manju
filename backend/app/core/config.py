@@ -9,7 +9,7 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parents[2]  # backend/
 REPO_ROOT = BASE_DIR.parent
 
-#: MVP 单用户工作区：所有项目归属同一个本地创作者。
+#: 单用户工作区：所有项目归属同一个本地创作者（接入登录后改为按账号隔离）。
 #: 必须与 main._seed() 里创建的用户 id 一致，否则 User 1—N Project 关系会悬空。
 LOCAL_USER_ID = "usr_local"
 LOCAL_WORKSPACE_ID = "ws_local"
@@ -62,7 +62,7 @@ class Settings:
 
     def __init__(self) -> None:
         self.app_name = "hoyo漫剧 API"
-        self.version = "0.1.0-mvp"
+        self.version = "1.0.0"
         self.env = _env("APP_ENV", "dev")
 
         # --- 数据库 ---

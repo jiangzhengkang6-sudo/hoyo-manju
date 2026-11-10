@@ -1,9 +1,9 @@
 {
   "name": "hoyomanju-frontend",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0",
   "type": "module",
-  "description": "hoyo漫剧 — AI 漫剧制作平台前端（MVP）",
+  "description": "hoyo漫剧 — AI 漫剧制作平台前端",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

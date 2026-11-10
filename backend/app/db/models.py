@@ -307,7 +307,7 @@ class WorkflowRun(Base, TimestampMixin):
     __tablename__ = "workflow_runs"
     id: Mapped[str] = _id("wfr")
     episode_id: Mapped[str] = mapped_column(String(48), ForeignKey("episodes.id"), index=True)
-    graph_version: Mapped[str] = mapped_column(String(32), default="mvp-1")
+    graph_version: Mapped[str] = mapped_column(String(32), default="v1")
     state_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     checkpoint_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
     checkpoint_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -430,7 +430,7 @@ class EventLog(Base, TimestampMixin):
 
 
 class EntityVersion(Base, TimestampMixin):
-    """剧本 / 角色描述 / 提示词 / 时间线版本记录（FR-MVP-004）。"""
+    """剧本 / 角色描述 / 提示词 / 时间线版本记录（FR-004）。"""
 
     __tablename__ = "entity_versions"
     id: Mapped[str] = _id("ver")

@@ -38,7 +38,7 @@ if settings.database_url.startswith("sqlite"):
 
 
 def init_db() -> None:
-    """创建全部表（MVP 使用 create_all；生产迁移走 Alembic）。"""
+    """创建全部表（开发期用 create_all；结构变更走 Alembic 迁移）。"""
     Base.metadata.create_all(engine)
 
 

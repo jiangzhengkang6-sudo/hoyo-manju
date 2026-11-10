@@ -1,4 +1,4 @@
-"""CharacterAgent：角色设定、参考图任务、一致性参数（FR-MVP-020/021/023/024）。"""
+"""CharacterAgent：角色设定、参考图任务、一致性参数（FR-020/021/023/024）。"""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ KIND_FRAMING = {
 
 
 def consistency_params(character: CharacterAsset) -> dict[str, Any]:
-    """一致性参数：MVP 通过固定提示词片段 + 参考图引用保证角色一致（不做 LoRA）。"""
+    """一致性参数：用固定提示词片段 + 参考图引用保证角色一致（未引入 LoRA/IP-Adapter）。"""
     spec = character.spec_json or {}
     traits = [
         spec.get("appearance", ""),
@@ -199,7 +199,7 @@ def confirm_primary(session: Session, character: CharacterAsset, media_id: str) 
 
 
 def affected_shots(session: Session, character: CharacterAsset) -> list[dict[str, Any]]:
-    """替换主参考图后受影响的分镜（FR-MVP-024）。"""
+    """替换主参考图后受影响的分镜（FR-024）。"""
     rows = session.execute(
         select(Shot, ShotCharacterRef)
         .join(ShotCharacterRef, ShotCharacterRef.shot_id == Shot.id)

@@ -1,4 +1,4 @@
-# hoyo漫剧 MVP — 后端 API 契约（v1）
+# hoyo漫剧 · 后端 API 契约（v1）
 
 所有接口前缀 `/api/v1`。除 `/health`、`/media/{id}/content` 外，请求与响应均为 JSON（`application/json; charset=utf-8`）。
 时间字段统一 ISO-8601 UTC 字符串（如 `2026-01-01T08:00:00Z`）。金额统一为**最小货币单位整数**（分，字段名以 `_cents` 结尾）。

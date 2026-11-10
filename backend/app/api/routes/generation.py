@@ -221,7 +221,7 @@ def generate_video(episode_id: str, payload: VideoGenerateIn, session: SessionDe
     # §12：视频供应商被熔断时只暂停**视频**任务；剧本/画面/素材包照常可用
     degraded_service.ensure_available(degraded_service.KIND_VIDEO, action="视频生成")
     if not payload.confirm:
-        raise Conflict("视频生成必须先确认成本（FR-MVP-041）")
+        raise Conflict("视频生成必须先确认成本（FR-041）")
     shots = shots_of(session, episode.id)
     if payload.shot_nos:
         shots = [s for s in shots if s.shot_no in set(payload.shot_nos)]

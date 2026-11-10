@@ -322,7 +322,7 @@ def update_episode(episode_id: str, payload: EpisodeUpdate, session: SessionDep)
 
 @router.post("/episodes/{episode_id}/copy", status_code=201)
 def copy_episode(episode_id: str, payload: EpisodeCopy, session: SessionDep) -> dict:
-    """复制剧集：复制剧本与资产引用，不复制进行中任务（FR-MVP-002）。"""
+    """复制剧集：复制剧本与资产引用，不复制进行中任务（FR-002）。"""
     source = get_episode(session, episode_id=episode_id)
     episode_no = int(
         session.scalar(

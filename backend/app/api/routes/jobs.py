@@ -1,4 +1,4 @@
-"""任务中心与 SSE 事件流（FR-MVP-070~074）。"""
+"""任务中心与 SSE 事件流（FR-070~074）。"""
 
 from __future__ import annotations
 

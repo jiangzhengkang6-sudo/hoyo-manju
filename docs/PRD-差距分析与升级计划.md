@@ -1,7 +1,7 @@
 # PRD 差距分析与升级计划
 
 **对照文档**：`PRD-智能体漫剧平台-全新方案.md`（V1.0 正式要求）
-**审计对象**：hoyo漫剧 MVP（`backend/` + `frontend/`）
+**审计对象**：hoyo漫剧（`backend/` + `frontend/`）
 **审计方式**：5 组并行审计，逐条需求到代码里取证（每条结论都带 `文件:行号`），共核查 79 个需求条目
 **审计日期**：2026-10-12
 
@@ -18,7 +18,7 @@
 | 🟡 partial | 36 | 46% | 主体已实现，存在字段/路径/交互级缺口 |
 | ❌ missing | 6 | 8% | 完全没有 |
 
-**一句话结论**：MVP 已经把 PRD 的**功能主链路**做得相当完整——没有一条生产链路是缺失的，
+**一句话结论**：项目已经把 PRD 的**功能主链路**做得相当完整——没有一条生产链路是缺失的，
 生成也都是真实的（Mock 供应商用 Pillow/FFmpeg 真出图、真出片、真出音，不是占位桩）。
 差距集中在三处：**① 若干真实缺陷（含会清空用户数据的一个）；② 非功能要求与降级策略；
 ③ 前端信息架构（五区布局、缺失页面、自动化验收）**。
@@ -157,7 +157,7 @@
 | 4 | 重命名查重未限定用户 | `backend/app/api/routes/projects.py:155-157` | 与创建口径不一致 | ✅ 已修 |
 | 5 | 故事分析面板渲染不出来：后端存 `analysis_json`，前端读 `story.analysis`；且 `GET /story` 的 `{story:…}` 信封未解包（刷新后故事正文也变空） | `backend/app/api/routes/story.py:103,168` + `frontend/src/views/EpisodeStoryView.vue:384` | FR-011 的「主题/人物关系/场景清单/冲突目标」用户看不到 | ✅ 已修 |
 | 6 | 「重新规划后续镜头」是死开关：`replan_downstream` 只写进 `job.input_json`，无人读取 | `backend/app/api/routes/story.py:275` + `backend/app/services/executor.py:162-200` | FR-014 该选项点了没反应 | ✅ 已修 |
-| 7 | 自动重试根本不存在：`max_attempts` / `auto_retry_limit` 从未被 worker/executor 消费 | `backend/app/core/config.py:85`、`backend/app/services/jobs.py:94`（仅写入回显），`docs/MVP-实现说明.md:139` 却宣称有 | FR-072「系统有限自动重试」与 §10.2 `FAILED→RETRYING→QUEUED` 整条缺失；`RETRYING`、`EXPIRED` 是死枚举 | ✅ 已修 |
+| 7 | 自动重试根本不存在：`max_attempts` / `auto_retry_limit` 从未被 worker/executor 消费 | `backend/app/core/config.py:85`、`backend/app/services/jobs.py:94`（仅写入回显），`docs/实现说明.md:139` 却宣称有 | FR-072「系统有限自动重试」与 §10.2 `FAILED→RETRYING→QUEUED` 整条缺失；`RETRYING`、`EXPIRED` 是死枚举 | ✅ 已修 |
 | 8 | 批量确认绕过安全检查：`confirm-batch` 不校验 `safety_status=BLOCKED` | `backend/app/api/routes/story.py:441-472` | FR-081 高风险内容可经批量入口进入导出 | ✅ 已修 |
 | 9 | 导出任务忽略传入的 `watermark` 开关，恒为 False | `backend/app/services/executor.py:389-392` | FR-062 水印开关对正式导出无效 | ✅ 已修 |
 | 10 | 候选安全态字段名不一致：前端读 `cand.safety`，接口返回 `safety_status` | `frontend/src/components/CandidatePicker.vue:136` + `backend/app/services/media.py:211` | FR-034 候选图安全检查结果恒显示「未检查」 | ✅ 已修 |
@@ -332,7 +332,7 @@ FR-004 版本记录 → FR-014 节拍级重生成 → §6.6 工具白名单 → 
 
 ## 6. 保持不动的设计决策
 
-这些是 MVP 阶段的有意选择，升级时不应回退：
+这些是当前阶段的有意选择，升级时不应回退：
 
 1. **请求级 Session 必须在响应前提交**——`RequestSessionMiddleware` 拦截 `http.response.start`；
    改回 `yield` 依赖会让「创建项目→立刻建剧集」约 6 成概率 404。

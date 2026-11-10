@@ -1,4 +1,4 @@
-"""StoryAgent：故事结构、人物表、场景表、剧情节拍与分镜初稿（FR-MVP-011/012/013）。"""
+"""StoryAgent：故事结构、人物表、场景表、剧情节拍与分镜初稿（FR-011/012/013）。"""
 
 from __future__ import annotations
 

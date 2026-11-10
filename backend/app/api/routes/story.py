@@ -678,7 +678,7 @@ def confirm_shot(shot_id: str, payload: SelectCandidate, session: SessionDep) ->
     shot = get_shot(session, shot_id=shot_id)
     asset = image_agent._require_owned(session, shot, payload.media_id)
     if asset.status == AssetStatus.REJECTED.value:
-        raise StateConflict("质量检查未通过的图片不能确认用于视频生成（FR-MVP-034）")
+        raise StateConflict("质量检查未通过的图片不能确认用于视频生成（FR-034）")
     if asset.safety_status == "BLOCKED":
         raise StateConflict("内容安全未通过的图片不能确认")
     shot.selected_media_id = payload.media_id

@@ -1,4 +1,4 @@
-"""内容安全：输入检查、输出检查、AIGC 标识（FR-MVP-080/081/083）。"""
+"""内容安全：输入检查、输出检查、AIGC 标识（FR-080/081/083）。"""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import Any
 
 from app.core.config import settings
 
-#: 高风险类别关键词（MVP 使用可配置词表，后续可替换为审核 API）
+#: 高风险类别关键词（当前为可配置词表，可替换为第三方审核 API）
 CATEGORY_RULES: dict[str, list[str]] = {
     "violence": ["血腥", "肢解", "虐杀", "屠杀"],
     "sexual": ["色情", "裸体", "性行为"],

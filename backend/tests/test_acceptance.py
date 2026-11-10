@@ -1,4 +1,4 @@
-"""MVP 验收用例：故事输入 → 剧本确认 → 角色/画风 → 分镜图 → 视频 → 音频 → 合成 → 预览 → 导出。"""
+"""端到端验收用例：故事输入 → 剧本确认 → 角色/画风 → 分镜图 → 视频 → 音频 → 合成 → 预览 → 导出。"""
 
 from __future__ import annotations
 
@@ -82,7 +82,7 @@ def _confirm_all_shots(client: TestClient, episode_id: str) -> None:
         assert confirmed.status_code == 200, confirmed.text
 
 
-def test_full_mvp_loop(client: TestClient, worker, project: dict, episode: dict) -> None:
+def test_full_loop(client: TestClient, worker, project: dict, episode: dict) -> None:
     episode_id = episode["id"]
     _run_to_shot_gate(client, episode, project)
     _confirm_all_shots(client, episode_id)

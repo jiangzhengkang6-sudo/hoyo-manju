@@ -1,4 +1,4 @@
-"""AudioAgent：TTS、BGM、音效规划（FR-MVP-050/051/052）。"""
+"""AudioAgent：TTS、BGM、音效规划（FR-050/051/052）。"""
 
 from __future__ import annotations
 
@@ -1350,7 +1350,7 @@ def add_track(
     if asset.kind != "audio":
         raise StateConflict("只能挂载音频类素材")
     if not rights_declared and not asset.rights_declared:
-        raise StateConflict("上传或选择 BGM/音效时必须声明使用权（FR-MVP-082）")
+        raise StateConflict("上传或选择 BGM/音效时必须声明使用权（FR-082）")
     if end_ms and end_ms <= start_ms:
         raise StateConflict("结束时间必须大于开始时间")
     track = AudioTrack(

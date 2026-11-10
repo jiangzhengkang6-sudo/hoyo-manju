@@ -1,4 +1,4 @@
-"""Pydantic v2 请求/响应模型与剧本 Schema（FR-MVP-013）。"""
+"""Pydantic v2 请求/响应模型与剧本 Schema（FR-013）。"""
 
 from __future__ import annotations
 

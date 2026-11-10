@@ -103,7 +103,7 @@ class Worker:
 
 
 class EmbeddedWorker:
-    """在 API 进程内以事件循环任务形式运行 worker（MVP 单机部署默认）。"""
+    """在 API 进程内以事件循环任务形式运行 worker（单机部署默认）。"""
 
     def __init__(self) -> None:
         self.worker = Worker()

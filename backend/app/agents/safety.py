@@ -1,4 +1,4 @@
-"""SafetyAgent：内容检查、AIGC 标识、风险记录（FR-MVP-080/081/083）。"""
+"""SafetyAgent：内容检查、AIGC 标识、风险记录（FR-080/081/083）。"""
 
 from __future__ import annotations
 

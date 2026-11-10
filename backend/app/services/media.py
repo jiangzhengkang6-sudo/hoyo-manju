@@ -1,4 +1,4 @@
-"""媒体资产服务：落库、签名 URL、质量检查（FR-MVP-034）。"""
+"""媒体资产服务：落库、签名 URL、质量检查（FR-034）。"""
 
 from __future__ import annotations
 

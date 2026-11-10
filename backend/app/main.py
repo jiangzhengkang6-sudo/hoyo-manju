@@ -189,7 +189,7 @@ def _seed() -> None:
 app = FastAPI(
     title=settings.app_name,
     version=settings.version,
-    description="面向个人创作者的 AI 漫剧端到端制作工作台（MVP）",
+    description="面向个人创作者的 AI 漫剧端到端制作工作台",
     lifespan=lifespan,
 )
 

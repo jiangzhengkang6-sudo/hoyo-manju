@@ -1,4 +1,4 @@
-"""VideoAgent：视频片段生成与时长校验（FR-MVP-040~043）。"""
+"""VideoAgent：视频片段生成与时长校验（FR-040~043）。"""
 
 from __future__ import annotations
 
@@ -111,7 +111,7 @@ def frame_media_id(session: Session, shot: Shot) -> str | None:
 
 
 def clamp_to_provider(params: dict[str, Any], capabilities: Any) -> dict[str, Any]:
-    """按供应商能力限制可选项（FR-MVP-040）。"""
+    """按供应商能力限制可选项（FR-040）。"""
     out = dict(params)
     out["duration_ms"] = max(
         capabilities.duration_ms_min, min(int(out["duration_ms"]), capabilities.duration_ms_max)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, TypedDict
 
-GRAPH_VERSION = "mvp-1"
+GRAPH_VERSION = "v1"
 
 NODE_SEQUENCE = [
     "initialize",
