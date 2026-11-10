@@ -1,6 +1,6 @@
-# hoyo漫剧 后端依赖（MVP）
+# hoyo漫剧 后端依赖
 # 安装：pip install -r requirements.txt
-# 说明：MVP 默认使用 SQLite + 本地磁盘存储 + FFmpeg，无需额外中间件即可跑通闭环。
+# 说明：默认使用 SQLite + 本地磁盘存储 + FFmpeg，无需额外中间件即可跑通闭环。
 
 # --- Web 框架 ---
 fastapi==0.143.0
