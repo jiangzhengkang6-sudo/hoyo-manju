@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Query
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 
 from app.agents import character as character_agent
 from app.agents import audio as audio_agent
@@ -27,23 +28,32 @@ from app.api.deps import (
     voice_dict,
 )
 from app.core.config import LOCAL_USER_ID
-from app.core.errors import Conflict, NotFound, StateConflict
+from app.core.errors import Conflict, NotFound, ProviderError, StateConflict
 from app.db.models import (
     Approval,
     AssetStatus,
     AudioTrack,
     AuditLog,
     CharacterAsset,
+    EntityVersion,
     Episode,
     EpisodeStage,
+    EventLog,
+    ExportRecord,
     Job,
+    JobStatus,
     MediaAsset,
     Project,
+    ProviderCall,
+    SafetyAppeal,
     Shot,
     ShotCharacterRef,
     StoryDocument,
     StyleAsset,
+    SubtitleCue,
     Voice,
+    WorkflowNodeLog,
+    WorkflowRun,
 )
 from app.schemas import (
     CharacterConfirm,
@@ -59,12 +69,14 @@ from app.schemas import (
     StyleIn,
     StyleUpdate,
     VoiceBind,
+    VoiceSpeedIn,
     VoiceCreate,
 )
 from app.services import audit as audit_service
 from app.services import events
 from app.services import jobs as jobs_service
 from app.services import versions as versions_service
+from app.services.storage import get_storage
 
 router = APIRouter(tags=["projects"])
 
@@ -189,6 +201,9 @@ def update_project(project_id: str, payload: ProjectUpdate, session: SessionDep)
         value = getattr(payload, field)
         if value is not None:
             setattr(project, field, value)
+    if payload.default_voice_speed is not None:
+        # 只改「以后新建角色」的初始值；已存在的角色要显式应用（见 /voice-speed）
+        project.default_voice_speed = audio_agent.clamp_speed(payload.default_voice_speed)
     session.flush()
     return project_dict(session, project)
 
@@ -412,6 +427,109 @@ def restore_episode(episode_id: str, session: SessionDep) -> dict:
     return episode_dict(session, episode)
 
 
+logger = logging.getLogger("hoyomanju")
+
+#: 删除剧集时要先清掉的「孙表」（外键指向剧集子表，不能直接 CASCADE）
+_EPISODE_CHILD_MODELS = (
+    StoryDocument,
+    Shot,
+    CharacterAsset,
+    AudioTrack,
+    SubtitleCue,
+    ExportRecord,
+    Approval,
+    SafetyAppeal,
+    WorkflowRun,
+)
+
+
+@router.delete("/episodes/{episode_id}")
+def delete_episode(episode_id: str, session: SessionDep) -> dict:
+    """**彻底删除**剧集及其全部内容（不可恢复）。
+
+    与「归档」（`status=ARCHIVED`，可恢复）不同，这里会连同剧本、分镜、角色卡、
+    音轨、字幕、媒体文件、任务、工作流运行、审批与申诉一起删除。
+
+    两条安全线：
+    1. 还有进行中的任务时拒绝（409），避免 worker 正在写的行被删掉；
+    2. 成本流水与审计日志**保留**（财务与合规要求），只是不再挂在剧集上。
+    """
+    episode = get_episode(session, episode_id=episode_id)
+    active_statuses = (
+        JobStatus.CREATED.value,
+        JobStatus.QUEUED.value,
+        JobStatus.RUNNING.value,
+        JobStatus.RETRYING.value,
+        JobStatus.CANCELLING.value,
+    )
+    active = session.scalar(
+        select(func.count())
+        .select_from(Job)
+        .where(Job.episode_id == episode.id, Job.status.in_(active_statuses))
+    )
+    if active:
+        raise StateConflict("该剧集还有进行中的任务，请先取消或等任务结束再删除")
+
+    shot_ids = list(session.scalars(select(Shot.id).where(Shot.episode_id == episode.id)))
+    run_ids = list(
+        session.scalars(select(WorkflowRun.id).where(WorkflowRun.episode_id == episode.id))
+    )
+    job_ids = list(session.scalars(select(Job.id).where(Job.episode_id == episode.id)))
+    document_ids = list(
+        session.scalars(select(StoryDocument.id).where(StoryDocument.episode_id == episode.id))
+    )
+    media = list(session.scalars(select(MediaAsset).where(MediaAsset.episode_id == episode.id)))
+
+    # 1) 先删「孙表」：分镜→角色引用、工作流节点日志、供应商调用记录
+    if shot_ids:
+        session.execute(delete(ShotCharacterRef).where(ShotCharacterRef.shot_id.in_(shot_ids)))
+    if run_ids:
+        session.execute(
+            delete(WorkflowNodeLog).where(WorkflowNodeLog.workflow_run_id.in_(run_ids))
+        )
+    if job_ids:
+        session.execute(delete(ProviderCall).where(ProviderCall.job_id.in_(job_ids)))
+
+    # 2) 再删剧集直属子表（有外键指向 episodes）
+    for model in _EPISODE_CHILD_MODELS:
+        session.execute(delete(model).where(model.episode_id == episode.id))
+
+    # 3) 无外键但属于剧集运行态的数据
+    session.execute(delete(Job).where(Job.episode_id == episode.id))
+    session.execute(delete(EventLog).where(EventLog.episode_id == episode.id))
+    session.execute(delete(MediaAsset).where(MediaAsset.episode_id == episode.id))
+    entity_ids = [*shot_ids, *document_ids]
+    if entity_ids:
+        session.execute(delete(EntityVersion).where(EntityVersion.entity_id.in_(entity_ids)))
+
+    # 4) 媒体文件（尽力而为：文件删不掉也要让数据行消失，避免列表里点开是坏图）
+    storage = get_storage()
+    removed_files = 0
+    for asset in media:
+        try:
+            storage.delete(asset.storage_key)
+            removed_files += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("删除媒体文件失败（忽略）：%s %s", asset.storage_key, exc)
+
+    title = episode.title
+    session.delete(episode)
+    session.flush()
+
+    # 5) 审计留痕放在最后：即使剧集没了，也要能查到「谁删了什么」
+    audit(
+        session,
+        action=audit_service.ACTION_DELETE,
+        target_type=audit_service.TARGET_EPISODE,
+        target_id=episode_id,
+        project_id=episode.project_id,
+        episode_id=episode_id,
+        detail={"title": title, "media_files": removed_files, "shots": len(shot_ids)},
+    )
+    session.flush()
+    return {"deleted": True, "episode_id": episode_id, "media_files": removed_files}
+
+
 @router.get("/episodes/{episode_id}/overview")
 def episode_overview(episode_id: str, session: SessionDep) -> dict:
     from app.agents import edit as edit_agent
@@ -546,12 +664,19 @@ def list_characters(
     project_id: str,
     session: SessionDep,
     include_archived: bool = Query(False),
+    episode_id: str | None = Query(None),
+    include_all: bool = Query(False),
 ) -> dict:
     """项目角色列表。
 
     `DELETE /characters/{id}` 是**软归档**（只把 status 置为 ARCHIVED），所以这里默认
     过滤掉已归档的角色 —— 否则前端「归档」后一刷新角色又回来了，看起来像没生效。
     需要看历史角色时传 `include_archived=true`（与 `GET /projects` 同一套约定）。
+
+    角色卡是**项目级资产库**，但一个项目下可能有多集完全不相干的故事
+    （例如 EP02 异世界、EP03 刑侦）。带 `episode_id` 时只返回「本集剧本人物表
+    + 分镜里出现过 + 手工新增」的角色，避免角色页混进别的剧集的角色；
+    `include_all=true` 可看全项目。
     """
     get_project(session, project_id=project_id)
     stmt = (
@@ -561,21 +686,47 @@ def list_characters(
     )
     if not include_archived:
         stmt = stmt.where(CharacterAsset.status != AssetStatus.ARCHIVED.value)
-    return {"items": [character_dict(session, c) for c in session.scalars(stmt)]}
+    characters = list(session.scalars(stmt))
+    hidden = 0
+    if episode_id and not include_all:
+        get_episode(session, episode_id=episode_id)  # 不存在时直接 404
+        own = [c for c in characters if c.episode_id == episode_id]
+        others = [c for c in characters if c.episode_id not in (None, episode_id)]
+        shared = [c for c in characters if c.episode_id is None]
+        # 本集已有专属卡时，同名的项目级公共卡不再重复显示
+        shadowed = {c.name for c in own}
+        characters = own + [c for c in shared if c.name not in shadowed]
+        hidden = len(others)
+    return {
+        "items": [character_dict(session, c) for c in characters],
+        "total": len(characters),
+        # 被「按剧集过滤」挡掉的其他剧集角色数，前端用它提示「还有 N 个角色在别的剧集」
+        "hidden": hidden,
+    }
 
 
 @router.post("/projects/{project_id}/characters", status_code=201)
 def create_character(project_id: str, payload: CharacterCreate, session: SessionDep) -> dict:
     project = get_project(session, project_id=project_id)
+    episode_id = payload.episode_id
+    if episode_id:
+        episode = get_episode(session, episode_id=episode_id)
+        if episode.project_id != project.id:
+            raise Conflict("剧集不属于当前项目")
+    # 手工新增：默认是项目级公共角色（episode_id 为空）；从某一集页面新增时带上剧集，
+    # 避免同名角色在别的剧集里也冒出来。
     dup = session.scalar(
         select(CharacterAsset).where(
-            CharacterAsset.project_id == project.id, CharacterAsset.name == payload.name
+            CharacterAsset.project_id == project.id,
+            CharacterAsset.name == payload.name,
+            CharacterAsset.episode_id == episode_id,
         )
     )
     if dup:
         raise Conflict(f"角色已存在：{payload.name}")
     character = CharacterAsset(
         project_id=project.id,
+        episode_id=episode_id,
         name=payload.name,
         spec_json={
             "identity": payload.identity,
@@ -588,10 +739,55 @@ def create_character(project_id: str, payload: CharacterCreate, session: Session
         },
         is_main=payload.is_main,
         status=AssetStatus.DRAFT.value,
+        # FR-051：初始语速跟随项目「统一语速」，避免每个角色都要手动设一遍
+        voice_speed=float(project.default_voice_speed or 1.0),
     )
     session.add(character)
     session.flush()
     return character_dict(session, character)
+
+
+@router.post("/episodes/{episode_id}/characters/sync")
+def sync_characters_from_story(
+    episode_id: str,
+    session: SessionDep,
+    force: bool = Query(False),
+) -> dict:
+    """从该剧集的最新剧本抓取角色，生成/补全角色卡（幂等，可反复调用）。
+
+    剧本生成时后端已经自动同步过一次；这个接口给「改了剧本想重新抓」「角色页
+    数据看着不对想刷新」提供显式入口。默认**不覆盖**用户手改过的字段，
+    `force=true` 才会用剧本人物表整体覆盖。
+    """
+    episode = get_episode(session, episode_id=episode_id)
+    document = session.scalar(
+        select(StoryDocument)
+        .where(StoryDocument.episode_id == episode.id)
+        .order_by(StoryDocument.version.desc())
+        .limit(1)
+    )
+    if document is None:
+        raise NotFound("该剧集尚未生成剧本，无法抓取角色")
+    project = get_project(session, project_id=episode.project_id)
+    result = character_agent.sync_characters_from_script(
+        session,
+        project,
+        document.story_json or {},
+        document=document,
+        episode_id=episode.id,
+        force=force,
+    )
+    characters = result["characters"]
+    return {
+        "episode_id": episode.id,
+        "script_version": document.version,
+        "created": len(result["created"]),
+        "updated": len(result["updated"]),
+        "kept": len(result["kept"]),
+        "total": len(characters),
+        "names": [c.name for c in characters],
+        "items": [character_dict(session, c) for c in characters],
+    }
 
 
 @router.get("/characters/{character_id}")
@@ -610,6 +806,10 @@ def update_character(character_id: str, payload: CharacterUpdate, session: Sessi
         if value is not None and spec.get(field) != value:
             spec[field] = value
             changed = True
+    if changed:
+        # 手动改过的角色不再被「剧本同步」覆盖（用户改的东西优先），
+        # 需要「用剧本覆盖」时走 sync 接口的 force=true。
+        spec[character_agent.MARK_USER_EDITED] = True
     character.spec_json = spec
     if payload.is_main is not None:
         character.is_main = payload.is_main
@@ -633,7 +833,7 @@ def update_character(character_id: str, payload: CharacterUpdate, session: Sessi
             session,
             entity_type=versions_service.TARGET_CHARACTER,
             entity_id=character.id,
-            payload=spec,
+            payload=character_agent.public_spec(spec),
             note="角色描述更新",
         )
         shots = session.scalars(
@@ -700,10 +900,17 @@ def character_assets(character_id: str, session: SessionDep) -> dict:
     from app.services import media as media_service
 
     character = get_character(session, character_id=character_id)
-    items = [
-        media_service.to_dict(a)
-        for a in media_service.list_media(session, owner_id=character.id, limit=200)
-    ]
+    items = []
+    # 已驳回的素材不进列表：它们可能正是「同名文件被覆盖」留下的历史记录，
+    # 展示出来会让用户看到张冠李戴的图。
+    for asset in media_service.list_media(
+        session, owner_id=character.id, limit=200, include_rejected=False
+    ):
+        row = media_service.to_dict(asset)
+        # 前端契约（types/index.ts CharacterAsset）用 `media_id`；媒体行本身是 `id`。
+        # 不补这个别名，前端 `asset.media_id` 就是 undefined，点「设为主图」会提交空 body → 422。
+        row["media_id"] = asset.id
+        items.append(row)
     return {"items": items, "primary_media_id": character.primary_media_id}
 
 
@@ -793,6 +1000,57 @@ def create_voice(project_id: str, payload: VoiceCreate, session: SessionDep) -> 
     return voice_dict(voice)
 
 
+@router.post("/projects/{project_id}/voice-speed")
+def apply_project_voice_speed(
+    project_id: str, payload: VoiceSpeedIn, session: SessionDep
+) -> dict:
+    """把统一语速应用到项目下**全部角色**，并把已有配音标记为过期。
+
+    只改角色设定，不重新合成音频；用户在音频页点「生成全部台词」即可按新语速重跑。
+    """
+    project = get_project(session, project_id=project_id)
+    speed = audio_agent.clamp_speed(payload.speed)
+    project.default_voice_speed = speed
+    updated: list[str] = []
+    retimed: list[str] = []
+    for character in session.scalars(
+        select(CharacterAsset).where(CharacterAsset.project_id == project.id)
+    ):
+        if character.status == AssetStatus.ARCHIVED.value:
+            continue
+        if abs(float(character.voice_speed or 1.0) - speed) < 1e-6:
+            continue
+        character.voice_speed = speed
+        updated.append(character.id)
+        for track in session.scalars(
+            select(AudioTrack).where(
+                AudioTrack.character_id == character.id, AudioTrack.kind == "dialogue"
+            )
+        ):
+            # 已有音频就地变速（本地 FFmpeg、0 费用），不用重跑模型；
+            # 失败才退回「标记过期，等用户重新生成」。
+            episode = session.get(Episode, track.episode_id) if track.episode_id else None
+            if episode is not None and track.media_id:
+                try:
+                    audio_agent.retime_track(
+                        session, episode=episode, track=track, speed=speed
+                    )
+                    retimed.append(track.id)
+                    continue
+                except Exception:  # noqa: BLE001 - 单条失败不应中断整体
+                    pass
+            track.stale = True
+            track.stale_reason = "统一语速已变更，需重新生成配音"
+    session.flush()
+    return {
+        "default_voice_speed": speed,
+        "updated_characters": updated,
+        "retimed_tracks": retimed,
+        "count": len(updated),
+        "retimed": len(retimed),
+    }
+
+
 @router.post("/characters/{character_id}/voice")
 def bind_voice(character_id: str, payload: VoiceBind, session: SessionDep) -> dict:
     character = get_character(session, character_id=character_id)
@@ -822,18 +1080,30 @@ def preview_voice(voice_id: str, session: SessionDep) -> dict:
     voice = session.get(Voice, voice_id)
     if voice is None:
         raise NotFound("音色不存在")
+    provider = resolve(ProviderKind.SPEECH, session)
+    # 供应商切换后旧音色 id 对面不认（会静默变成默认女声），顺手对齐并作废旧试听
+    audio_agent.align_voice_to_provider(session, voice, provider.id)
     if voice.preview_media_id:
         asset = session.get(MediaAsset, voice.preview_media_id)
         if asset:
             return {"media_id": asset.id, "url": media_service.media_url(asset)}
-    provider = resolve(ProviderKind.SPEECH, session)
     result = run_coro(
         provider.synthesize(
-            SpeechRequest(text="这是一段音色试听示例，用来确认角色的声音。", voice_id=voice.provider_voice_id)
+            SpeechRequest(
+                text="这是一段音色试听示例，用来确认角色的声音。",
+                voice_id=voice.provider_voice_id,
+                style_prompt=audio_agent.voice_style_prompt(voice),
+            )
         )
     )
     if not result.ok or not result.artifacts:
-        raise StateConflict(result.error_message or "音色试听生成失败")
+        # 音色试听失败是**供应商侧**的问题（网络/额度/产物下载），不是「当前状态不允许」，
+        # 之前一律抛 StateConflict(409)，前端只能看到「当前状态不允许该操作」，误导排查。
+        raise ProviderError(
+            result.error_message or "音色试听生成失败",
+            details={"provider": provider.id, "voice_id": voice.id},
+            retryable=True,
+        )
     asset = media_service.save_artifact(
         session,
         result.artifacts[0],

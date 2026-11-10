@@ -90,10 +90,9 @@ export function useJobWatcher(
 
   function start(): void {
     disposed = false
-    if (!pendingIds().length) {
-      active.value = false
-      return
-    }
+    // 不能因为「此刻没有待轮询 id」就 return：调用方往往先 track(job) 再补 jobIds，
+    // 早退会让这次轮询永远不启动，任务卡停在创建时的快照（排队中 0%）不动。
+    // 真正的空集合由 pollOnce() 处理（无 id 时立即把 active 置回 false）。
     active.value = true
     schedule()
   }
@@ -113,12 +112,16 @@ export function useJobWatcher(
     const id = typeof data.job_id === 'string' ? data.job_id : null
     if (!id) return
     const prev = jobs.value[id]
-    const patch: Partial<Job> = {}
+    const patch: Partial<Job> = { id }
     if (typeof data.status === 'string') patch.status = data.status as Job['status']
     if (typeof data.progress === 'number') patch.progress = data.progress
     if (typeof data.error_code === 'string') patch.error_code = data.error_code
     if (typeof data.error_message === 'string') patch.error_message = data.error_message
     if (typeof data.stage === 'string') patch.stage = data.stage
+    // 只带 progress 的事件没有 type/episode_id；首次出现的任务要能补齐，
+    // 否则底栏拿到的是「有进度但没有 id/类型」的半个对象，卡片直接渲染不出来。
+    if (typeof data.type === 'string') patch.type = data.type
+    if (typeof data.episode_id === 'string') patch.episode_id = data.episode_id
     jobs.value = { ...jobs.value, [id]: mergeJob(prev, patch) }
   }
 

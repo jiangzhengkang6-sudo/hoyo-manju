@@ -36,31 +36,31 @@ withDefaults(
   border-radius: 50%;
   border: 1px solid var(--line);
   background: var(--panel-2);
-  font-size: 18px;
+  font-size: var(--fs-19);
   color: var(--text-2);
-  background-image: var(--accent-grad);
-  -webkit-background-clip: text;
-  background-clip: text;
+}
+.empty.compact .empty-icon {
+  color: var(--text-3);
 }
 .empty-desc {
   max-width: 420px;
-  font-size: 12.5px;
+  font-size: var(--fs-12);
   line-height: 1.6;
 }
 .empty-actions {
   margin-top: 4px;
   display: flex;
-  gap: 8px;
+  gap: var(--space-2);
   flex-wrap: wrap;
   justify-content: center;
 }
 .empty.compact {
-  padding: 24px 16px;
-  gap: 7px;
+  padding: var(--space-6) var(--space-4);
+  gap: var(--space-2);
 }
 .empty.compact .empty-icon {
   width: 32px;
   height: 32px;
-  font-size: 14px;
+  font-size: var(--fs-14);
 }
 </style>

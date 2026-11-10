@@ -11,6 +11,7 @@ from sqlalchemy import select
 from app.agents import image as image_agent
 from app.agents import safety as safety_agent
 from app.agents import shot as shot_agent
+from app.agents import story as story_agent
 from app.api.deps import (
     SessionDep,
     get_episode,
@@ -39,6 +40,7 @@ from app.schemas import (
     ScriptValidate,
     SelectCandidate,
     ShotRegenerate,
+    ShotSuggestIn,
     ShotUpdate,
     StoryInput,
 )
@@ -327,6 +329,10 @@ def save_script(episode_id: str, payload: ScriptSave, session: SessionDep) -> di
     )
     episode.stage = EpisodeStage.SCRIPT_REVIEW.value
     session.flush()
+    # 注意：这里**不**自动抓角色。`PUT /script` 是人工保存动作，顺手建卡会让
+    # 「保存剧本」这个本该无副作用的接口产生新数据（也会跟用户随后手动新增
+    # 同名角色撞 409）。需要按改后的剧本重建角色卡时，走
+    # `POST /episodes/{id}/characters/sync`（角色页的「从剧本同步」按钮）。
     return {**_document_dict(document), "shot_count": len(shots)}
 
 
@@ -416,6 +422,37 @@ def regenerate_beats(episode_id: str, payload: BeatRegenerate, session: SessionD
     return {**jobs_service.to_dict(job), "shot_nos": shot_nos}
 
 
+@router.post("/episodes/{episode_id}/shots/{shot_no}/suggest")
+def suggest_shot(
+    episode_id: str,
+    shot_no: int,
+    payload: ShotSuggestIn,
+    session: SessionDep,
+) -> dict:
+    """按大纲为单个分镜生成一份**可编辑草稿**（不写库）。
+
+    前端把它填进「镜头描述」弹窗，用户改完再保存剧本；
+    与 `POST /shots/regenerate`（直接产出新版本）互补：
+    这里适合「这一镜不够贴剧情，让 AI 先给一版，我来定稿」。
+    """
+    episode = get_episode(session, episode_id=episode_id)
+    document = _latest_document(session, episode.id)
+    if document is None:
+        raise NotFound("该剧集尚未生成剧本")
+    suggestion, cost_cents = story_agent.suggest_shot(
+        session,
+        script=document.story_json or {},
+        shot_no=shot_no,
+        instruction=payload.instruction,
+    )
+    return {
+        "shot_no": shot_no,
+        "suggestion": suggestion,
+        "cost_cents": cost_cents,
+        "script_version": document.version,
+    }
+
+
 @router.post("/episodes/{episode_id}/shots/regenerate")
 def regenerate_shots(episode_id: str, payload: ShotRegenerate, session: SessionDep) -> dict:
     episode = get_episode(session, episode_id=episode_id)
@@ -468,6 +505,26 @@ def list_shots(episode_id: str, session: SessionDep) -> dict:
 def read_shot(shot_id: str, session: SessionDep) -> dict:
     shot = get_shot(session, shot_id=shot_id)
     return shot_agent.to_dict(session, shot, candidates=image_agent.candidates(session, shot))
+
+
+@router.post("/shots/{shot_id}/suggest")
+def suggest_shot_row(
+    shot_id: str,
+    payload: ShotSuggestIn,
+    session: SessionDep,
+) -> dict:
+    """按大纲给**这一镜**生成可编辑草稿（不写库）。
+
+    分镜画面页用它把动作/台词/构图/提示词填进编辑区，用户改完再点「保存镜头」。
+    与剧本页的 `/episodes/{id}/shots/{shot_no}/suggest` 共用同一套 prompt 与归一逻辑，
+    区别是这里以用户正在编辑的 `Shot` 行为准（可能已偏离剧本 JSON）。
+    """
+    shot = get_shot(session, shot_id=shot_id)
+    episode = get_episode(session, episode_id=shot.episode_id)
+    suggestion, cost_cents = story_agent.suggest_shot_for_row(
+        session, episode=episode, shot=shot, instruction=payload.instruction
+    )
+    return {"shot_no": shot.shot_no, "suggestion": suggestion, "cost_cents": cost_cents}
 
 
 @router.patch("/shots/{shot_id}")

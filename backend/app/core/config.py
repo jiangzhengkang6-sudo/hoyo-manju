@@ -146,6 +146,12 @@ class Settings:
 
         # --- 配额与限制（前端通过 /config/limits 读取） ---
         self.quota_limit_cents = _env_int("QUOTA_LIMIT_CENTS", 20000)
+        # 供应商的计价口径：ToAPIs 的 1 积分 = $0.005（实测 32.9652 积分 = $0.164826）。
+        # 系统内部仍用「分」记账（整数、不出精度问题），只在展示层换算成积分，
+        # 这样界面上看到的「消耗 3 积分」和供应商后台是同一个数。
+        self.credit_usd_value = _env_float("CREDIT_USD_VALUE", 0.005)
+        #: 总配额按积分给（留空则用 QUOTA_LIMIT_CENTS 反算）
+        self.quota_limit_credits = _env_float("QUOTA_LIMIT_CREDITS", 0.0)
         self.max_concurrent_jobs = _env_int("MAX_CONCURRENT_JOBS", 3)
         self.candidates_per_shot_default = _env_int("CANDIDATES_PER_SHOT_DEFAULT", 2)
         self.candidates_per_shot_max = _env_int("CANDIDATES_PER_SHOT_MAX", 4)
@@ -163,6 +169,10 @@ class Settings:
         self.speech_provider = _env("SPEECH_PROVIDER", self.default_provider)
         self.provider_timeout_seconds = _env_int("PROVIDER_TIMEOUT_SECONDS", 120)
         self.provider_max_retries = _env_int("PROVIDER_MAX_RETRIES", 1)
+        # 供应商出网代理：留空=跟随进程环境变量（默认）；
+        # `direct`=强制直连、忽略环境变量（沙箱/IDE 注入的代理常常把请求变成 502）；
+        # `http://127.0.0.1:7890`=显式指定代理。
+        self.provider_proxy_url = _env("PROVIDER_PROXY_URL")
         self.ark_api_key = _env("ARK_API_KEY")
         self.ark_base_url = _env("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")
         self.ark_text_model = _env("ARK_TEXT_MODEL", "doubao-seed-1-6-250615")
@@ -184,15 +194,29 @@ class Settings:
         self.deepseek_model = _env("DEEPSEEK_MODEL", "deepseek-chat")
 
         # --- toapis 聚合网关（图片 / 视频；统一走异步任务：提交拿 id，再轮询） ---
+        # 国内用户用 toapis.cn（本机实测直连可达，不需要代理）；境外可用 toapis.com。
         self.gemini_image_api_key = _env("GEMINI_IMAGE_API_KEY")
         self.gemini_image_url = _env(
-            "GEMINI_IMAGE_URL", "https://toapis.com/v1/images/generations"
+            "GEMINI_IMAGE_URL", "https://toapis.cn/v1/images/generations"
         )
         # 注意：toapis 的模型 id 区分大小写，必须用小写的 gemini-nano-banana-2.1
         self.gemini_image_model = _env("GEMINI_IMAGE_MODEL", "gemini-nano-banana-2.1")
+        #: 输出档位 1K/2K/4K（大写 K）。竖屏 9:16 想覆盖 1080×1920 用 2K 更稳。
+        self.gemini_image_resolution = _env("GEMINI_IMAGE_RESOLUTION", "2K")
         self.grok_video_api_key = _env("GROK_VIDEO_API_KEY")
-        self.grok_video_url = _env("GROK_VIDEO_URL", "https://toapis.com/v1/videos/generations")
-        self.grok_video_model = _env("GROK_VIDEO_MODEL", "grok-video-1.5")
+        self.grok_video_url = _env("GROK_VIDEO_URL", "https://toapis.cn/v1/videos/generations")
+        # 视频模型：`grok-video-1.5`（1~15 秒，走首帧模式）或 `seedance-2-mini`
+        # （4~15 秒，首帧用 image_with_roles）。后者在 grok 渠道熔断时仍可用。
+        self.grok_video_model = (
+            _env("TOAPIS_VIDEO_MODEL") or _env("GROK_VIDEO_MODEL", "seedance-2-mini")
+        )
+        #: grok-video-1.5 支持 480p / 720p（部分渠道 1080p）
+        self.grok_video_resolution = _env("GROK_VIDEO_RESOLUTION", "720p")
+        #: 网关回执是美元，内部记账用「分」→ 按此汇率折算
+        self.usd_cny_rate = _env_float("USD_CNY_RATE", 7.2)
+        #: 图片上传接口：本地首帧必须先上传换公网 URL（网关不接受 base64）。
+        #: 留空则按提交地址自动推导（同域 /v1/uploads/images）。
+        self.toapis_upload_url = _env("TOAPIS_UPLOAD_URL")
         #: 异步任务轮询间隔与总超时（秒）
         self.task_poll_interval_seconds = _env_int("TASK_POLL_INTERVAL_SECONDS", 8)
         self.task_timeout_seconds = _env_int("TASK_TIMEOUT_SECONDS", 900)
@@ -202,6 +226,13 @@ class Settings:
         self.tts_url = _env("TTS_URL")
         self.tts_api_model = _env("TTS_API_MODEL", "qwen-audio-3.1-tts-next")
         self.tts_voice = _env("TTS_VOICE", "Cherry")
+        # --- 通义网关：生图（同步，与 TTS 同一域名，国内可达） ---
+        self.qwen_image_url = _env(
+            "QWEN_IMAGE_URL",
+            "https://maas.qianwenaiapi.com/api/v1/services/aigc/multimodal-generation/generation",
+        )
+        self.qwen_image_model = _env("QWEN_IMAGE_MODEL", "qwen-image-2.1-turbo")
+        self.qwen_image_api_key = _env("QWEN_IMAGE_API_KEY")
 
         # --- 安全策略 ---
         self.safety_block_terms = [

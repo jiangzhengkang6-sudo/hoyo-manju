@@ -3,8 +3,8 @@ import { computed, ref } from 'vue'
 import { ApiError } from '@/api/errors'
 import { episodesApi } from '@/api/episodes'
 import { workflowApi } from '@/api/workflow'
-import { fetchShots } from '@/api/shots'
-import { fetchJobs } from '@/api/jobs'
+import { fetchShots, normalizeShot } from '@/api/shots'
+import { fetchJobs, isTerminalJobStatus } from '@/api/jobs'
 import { onWriteActivity } from '@/api/client'
 import { asList } from '@/api/projects'
 import { episodeEventsUrl } from '@/api/events'
@@ -96,6 +96,12 @@ export const useEpisodeStore = defineStore('episode', () => {
 
   /** 本页触发的任务，SSE 断线时回退到 `GET /jobs/{id}` 轮询。 */
   const watchedJobIds = ref<string[]>([])
+  // 分镜勾选状态放在 store 里：页面内的「生成分镜图」和底部批量操作栏要共用同一份，
+  // 否则底部栏会按「全部未确认」生成，跟用户勾选的对不上。
+  const selectedShotNos = ref<number[]>([])
+  function setSelectedShots(nos: number[]): void {
+    selectedShotNos.value = [...new Set(nos)].sort((a, b) => a - b)
+  }
 
   const stage = computed(() => episode.value?.stage ?? overview.value?.stage ?? null)
   const pendingGate = computed(() => workflow.value?.pending_gate ?? overview.value?.pending_gate ?? null)
@@ -113,11 +119,14 @@ export const useEpisodeStore = defineStore('episode', () => {
 
   function trackJob(job: Job | null | undefined): void {
     if (!job?.id) return
-    watcher.track(job)
-    jobsStore.upsert(job)
+    // 先把 id 加进监听列表，再交给 watcher：否则 watcher 启动时看不到这个任务，
+    // 轮询不会开始，卡片会永远停在「排队中 0%」（角色生成这类项目级任务尤其明显，
+    // 它们不带 episode_id，收不到本剧集的 SSE 事件，只能靠轮询）。
     if (!watchedJobIds.value.includes(job.id)) {
       watchedJobIds.value = [...watchedJobIds.value, job.id]
     }
+    watcher.track(job)
+    jobsStore.upsert(job)
   }
 
   /* ---------------- 数据加载 ---------------- */
@@ -132,9 +141,9 @@ export const useEpisodeStore = defineStore('episode', () => {
     }, REFRESH_THROTTLE_MS)
   }
 
-  async function loadEpisode(id: string): Promise<void> {
+  async function loadEpisode(id: string, options: { silent?: boolean } = {}): Promise<void> {
     episodeId.value = id
-    loading.value = true
+    if (!options.silent) loading.value = true
     error.value = null
     try {
       episode.value = await episodesApi.get(id)
@@ -142,7 +151,7 @@ export const useEpisodeStore = defineStore('episode', () => {
       error.value = toApiError(err)
       episode.value = null
     } finally {
-      loading.value = false
+      if (!options.silent) loading.value = false
     }
   }
 
@@ -222,13 +231,39 @@ export const useEpisodeStore = defineStore('episode', () => {
   }
 
   /** 事件驱动的轻量刷新（不重取分镜表整表，避免抖动）。 */
+  /**
+   * 实时刷新：SSE 事件驱动的增量重载。
+   *
+   * 这里必须包含分镜表与任务列表——之前只刷 overview/workflow/episode，
+   * 结果是「任务显示生成成功、候选图和画面状态却要手动刷新才出现」。
+   * 分镜表是候选图、image_status、video_status 的唯一来源，漏了它等于没刷。
+   */
+  let refreshQueued = false
+
   async function refreshLive(): Promise<void> {
-    if (!episodeId.value || refreshing.value) return
+    if (!episodeId.value) return
+    if (refreshing.value) {
+      // 直接 return 会把这次事件丢掉，而调度器的定时器已经清空 → 永远不会补刷。
+      // 记一个标记，等当前这轮结束后再来一次。
+      refreshQueued = true
+      return
+    }
     refreshing.value = true
     try {
-      await Promise.all([loadOverview(), loadWorkflow(), loadEpisode(episodeId.value)])
+      await Promise.all([
+        loadOverview(),
+        loadWorkflow(),
+        // silent：实时刷新不该整页闪骨架，只有首屏才需要 loading
+        loadEpisode(episodeId.value, { silent: true }),
+        loadShots(),
+        loadEpisodeJobs(),
+      ])
     } finally {
       refreshing.value = false
+      if (refreshQueued) {
+        refreshQueued = false
+        scheduleRefresh()
+      }
     }
   }
 
@@ -262,6 +297,23 @@ export const useEpisodeStore = defineStore('episode', () => {
   const sseState = computed<SseConnectionState>(() => sse.state.value)
   const lastEventAt = computed<number | null>(() => sse.lastEventAt.value)
 
+  /**
+   * 把事件里出现、但本页还没跟踪的任务纳入监听。
+   *
+   * 刷新页面后 `watchedJobIds` 是空的，正在跑的任务只存在于
+   * `GET /jobs?episode_id=` 那份一次性的快照里——底栏读到的是它，所以
+   * 进度永远停在拉取那一刻。补登记之后才会读 watcher 里的实时快照。
+   */
+  function adoptJob(data: Record<string, unknown>): void {
+    const id = typeof data.job_id === 'string' ? data.job_id : null
+    if (!id || watchedJobIds.value.includes(id)) return
+    const jobEpisode = typeof data.episode_id === 'string' ? data.episode_id : null
+    if (jobEpisode && episodeId.value && jobEpisode !== episodeId.value) return
+    watchedJobIds.value = [...watchedJobIds.value, id]
+    const snapshot = jobSnapshots.value[id]
+    if (snapshot && !isTerminalJobStatus(snapshot.status)) watcher.start()
+  }
+
   /** SSE 事件分发（API.md §10.1 事件类型）。 */
   function handleEvent(event: SseEvent): void {
     recentEvents.value = [event, ...recentEvents.value].slice(0, 40)
@@ -275,6 +327,7 @@ export const useEpisodeStore = defineStore('episode', () => {
       case 'job.cancelled':
         watcher.applyEvent(event.data)
         jobsStore.applyEvent(event.data)
+        adoptJob(event.data)
         if (event.type !== 'job.progress') scheduleRefresh()
         break
       case 'workflow.gate_waiting':
@@ -287,7 +340,9 @@ export const useEpisodeStore = defineStore('episode', () => {
         applyShotConfirmedEvent(event.data)
         break
       case 'media.created':
-        if (shotCount.value > 0) scheduleRefresh()
+        // 候选图落库就该立刻出现。以前加了 `shotCount > 0` 的前置判断，
+        // 分镜表还没加载时（首屏/刚切集）这次事件就被吞掉了。
+        scheduleRefresh()
         break
       case 'render.progress':
         scheduleRefresh()
@@ -421,8 +476,11 @@ export const useEpisodeStore = defineStore('episode', () => {
   function patchLocalShot(updated: Shot): void {
     const idx = shots.value.findIndex((s) => s.id === updated.id)
     if (idx < 0) return
+    // 接口返回的是「行 + shot_json」，store 里存的是扁平对象，合并前先摊平，
+    // 否则保存后切镜头/重载就看不到刚改的内容。
+    const flat = normalizeShot(updated)
     const next = [...shots.value]
-    next[idx] = { ...shots.value[idx], ...updated }
+    next[idx] = { ...shots.value[idx], ...flat }
     shots.value = next
   }
 
@@ -449,6 +507,8 @@ export const useEpisodeStore = defineStore('episode', () => {
     lastEventId: sse.lastEventId,
     eventCount: sse.eventCount,
     watchedJobIds,
+    selectedShotNos,
+    setSelectedShots,
     jobSnapshots,
     stage,
     pendingGate,

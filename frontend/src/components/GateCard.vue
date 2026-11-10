@@ -89,21 +89,21 @@ function submitEdit(): void {
 </script>
 
 <template>
-  <section class="gate-card" :class="{ waiting: isWaiting }">
+  <section class="gate-card" :class="{ waiting: isWaiting, idle: !isWaiting }">
     <header class="gate-head">
       <div class="gate-title-wrap">
-        <span class="gate-mark" aria-hidden="true">◆</span>
-        <div>
+        <span class="gate-mark" aria-hidden="true">{{ isWaiting ? '◆' : '○' }}</span>
+        <div class="gate-copy">
           <div class="gate-title">
             {{ isWaiting ? title : '当前无待确认门控' }}
-            <span v-if="isWaiting" class="badge badge-warn" style="margin-left: 8px">等待确认</span>
+            <span v-if="isWaiting" class="badge badge-warn">等待确认</span>
           </div>
-          <div class="gate-sub tiny dim">
+          <div class="gate-sub small dim">
             <template v-if="isWaiting">
               <span v-if="description">{{ description }}</span>
               <span v-else>确认后工作流将继续推进到下一阶段。</span>
             </template>
-            <template v-else>工作流会在需要你决策时停在此处。</template>
+            <template v-else>工作流会在需要你决策时停在这里，不会自行跳过。</template>
           </div>
         </div>
       </div>
@@ -118,91 +118,97 @@ function submitEdit(): void {
       </button>
     </header>
 
-    <div v-if="isWaiting" class="gate-meta tiny mono">
-      <span v-if="workflow?.id">run {{ workflow.id }}</span>
-      <span v-if="checkpointId">checkpoint {{ checkpointId }}</span>
-      <span v-if="targetVersion !== null">version {{ targetVersion }}</span>
-      <span v-if="workflow?.current_node">node {{ workflow.current_node }}</span>
-    </div>
+    <template v-if="isWaiting">
+      <p v-if="notice" class="gate-notice small">{{ notice }}</p>
 
-    <p v-if="notice" class="gate-notice tiny">{{ notice }}</p>
+      <div class="gate-body">
+        <slot />
+      </div>
 
-    <div class="gate-body">
-      <slot />
-    </div>
-
-    <footer class="gate-actions">
-      <template v-if="mode === 'idle'">
-        <button
-          type="button"
-          class="btn btn-primary"
-          :disabled="busy || !isWaiting"
-          @click="emit('approve')"
-        >
-          {{ busy ? '提交中…' : approveText }}
-        </button>
-        <button
-          v-if="allowReject"
-          type="button"
-          class="btn btn-danger"
-          :disabled="busy || !isWaiting"
-          @click="mode = 'reject'"
-        >
-          驳回
-        </button>
-        <button
-          v-if="allowEdit"
-          type="button"
-          class="btn"
-          :disabled="busy || !isWaiting"
-          @click="mode = 'edit'"
-        >
-          重新生成
-        </button>
-        <div class="grow" />
-        <slot name="actions" />
-      </template>
-
-      <template v-else-if="mode === 'reject'">
-        <textarea
-          v-model="reason"
-          class="textarea"
-          rows="2"
-          placeholder="请说明驳回原因（会作为决策 payload 回传后端）"
-        />
-        <div class="row">
+      <footer class="gate-actions">
+        <template v-if="mode === 'idle'">
           <button
             type="button"
-            class="btn btn-danger btn-sm"
-            :disabled="rejectDisabled"
-            @click="submitReject"
+            class="btn btn-primary"
+            :disabled="busy || !isWaiting"
+            @click="emit('approve')"
           >
-            提交驳回
+            {{ busy ? '提交中…' : approveText }}
           </button>
-          <button type="button" class="btn btn-ghost btn-sm" @click="mode = 'idle'">取消</button>
-        </div>
-      </template>
-
-      <template v-else>
-        <textarea
-          v-model="instruction"
-          class="textarea"
-          rows="2"
-          placeholder="请填写重做指令（例如：节奏再快一点，第 3 镜改成全景）"
-        />
-        <div class="row">
           <button
+            v-if="allowReject"
             type="button"
-            class="btn btn-sm"
-            :disabled="editDisabled"
-            @click="submitEdit"
+            class="btn btn-danger"
+            :disabled="busy || !isWaiting"
+            @click="mode = 'reject'"
           >
-            提交重做指令
+            驳回
           </button>
-          <button type="button" class="btn btn-ghost btn-sm" @click="mode = 'idle'">取消</button>
+          <button
+            v-if="allowEdit"
+            type="button"
+            class="btn"
+            :disabled="busy || !isWaiting"
+            @click="mode = 'edit'"
+          >
+            重新生成
+          </button>
+          <div class="grow" />
+          <slot name="actions" />
+        </template>
+
+        <template v-else-if="mode === 'reject'">
+          <textarea
+            v-model="reason"
+            class="textarea"
+            rows="2"
+            placeholder="请说明驳回原因（会作为决策 payload 回传后端）"
+          />
+          <div class="row">
+            <button
+              type="button"
+              class="btn btn-danger btn-sm"
+              :disabled="rejectDisabled"
+              @click="submitReject"
+            >
+              提交驳回
+            </button>
+            <button type="button" class="btn btn-ghost btn-sm" @click="mode = 'idle'">取消</button>
+          </div>
+        </template>
+
+        <template v-else>
+          <textarea
+            v-model="instruction"
+            class="textarea"
+            rows="2"
+            placeholder="请填写重做指令（例如：节奏再快一点，第 3 镜改成全景）"
+          />
+          <div class="row">
+            <button
+              type="button"
+              class="btn btn-sm"
+              :disabled="editDisabled"
+              @click="submitEdit"
+            >
+              提交重做指令
+            </button>
+            <button type="button" class="btn btn-ghost btn-sm" @click="mode = 'idle'">取消</button>
+          </div>
+        </template>
+      </footer>
+
+      <!-- 运行 id / checkpoint 这类内部信息收起来：默认界面只留人话 -->
+      <details class="gate-tech">
+        <summary>技术信息</summary>
+        <div class="gate-meta tiny mono">
+          <span v-if="workflow?.id">run {{ workflow.id }}</span>
+          <span v-if="checkpointId">checkpoint {{ checkpointId }}</span>
+          <span v-if="targetVersion !== null">version {{ targetVersion }}</span>
+          <span v-if="workflow?.current_node">node {{ workflow.current_node }}</span>
         </div>
-      </template>
-    </footer>
+      </details>
+    </template>
   </section>
 </template>
 
@@ -213,56 +219,80 @@ function submitEdit(): void {
   background: var(--panel);
   overflow: hidden;
 }
+/* 有待确认：左侧黄铜竖条 + 顶部淡黄晕，是全页唯一的「需要你动手」信号 */
 .gate-card.waiting {
-  border-color: rgba(251, 191, 36, 0.32);
+  border-color: rgba(232, 203, 109, 0.32);
+  border-left: 2px solid var(--warn);
   background:
-    linear-gradient(180deg, rgba(251, 191, 36, 0.06), transparent 46%),
+    linear-gradient(180deg, rgba(232, 203, 109, 0.06), transparent 42%),
     var(--panel);
+}
+/* 无待确认：退成一条虚线细条，不再占一大块并摆一排灰按钮 */
+.gate-card.idle {
+  border-style: dashed;
+  background: transparent;
 }
 .gate-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
-  padding: 14px 16px;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+}
+.gate-card.idle .gate-head {
+  padding: var(--space-2) var(--space-4);
+  align-items: center;
 }
 .gate-title-wrap {
   display: flex;
-  gap: 10px;
+  gap: var(--space-3);
   align-items: flex-start;
+  min-width: 0;
+}
+.gate-copy {
+  min-width: 0;
 }
 .gate-mark {
   color: var(--warn);
-  font-size: 13px;
+  font-size: var(--fs-13);
   margin-top: 3px;
+  flex: 0 0 auto;
+}
+.gate-card.idle .gate-mark {
+  color: var(--text-3);
 }
 .gate-title {
-  font-size: 14.5px;
-  font-weight: 640;
+  font-size: var(--fs-14);
+  font-weight: 620;
   display: flex;
   align-items: center;
+  gap: var(--space-2);
   flex-wrap: wrap;
+}
+.gate-card.idle .gate-title {
+  color: var(--text-1);
+  font-weight: 550;
 }
 .gate-sub {
   margin-top: 2px;
 }
 .gate-meta {
   display: flex;
-  gap: 14px;
+  gap: var(--space-4);
   flex-wrap: wrap;
-  padding: 0 16px 10px;
+  padding: 0 0 4px;
   color: var(--text-3);
 }
 .gate-notice {
-  margin: 0 16px 10px;
-  padding: 8px 10px;
+  margin: 0 var(--space-4) 10px;
+  padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-sm);
-  border: 1px solid rgba(251, 191, 36, 0.32);
+  border: 1px solid rgba(232, 203, 109, 0.32);
   background: var(--warn-soft);
   color: var(--warn);
 }
 .gate-body {
-  padding: 0 16px;
+  padding: 0 var(--space-4);
 }
 .gate-body:empty {
   display: none;
@@ -270,13 +300,36 @@ function submitEdit(): void {
 .gate-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   flex-wrap: wrap;
-  padding: 14px 16px;
+  padding: var(--space-3) var(--space-4);
   border-top: 1px solid var(--line);
-  margin-top: 14px;
+  margin-top: 12px;
 }
 .gate-actions .textarea {
   width: 100%;
+}
+.gate-tech {
+  padding: 0 var(--space-4) 10px;
+}
+.gate-tech > summary {
+  cursor: pointer;
+  font-size: var(--fs-11);
+  color: var(--text-3);
+  letter-spacing: 0.06em;
+  list-style: none;
+}
+.gate-tech > summary::-webkit-details-marker {
+  display: none;
+}
+.gate-tech > summary::before {
+  content: '▸ ';
+  color: var(--text-3);
+}
+.gate-tech[open] > summary::before {
+  content: '▾ ';
+}
+.gate-tech[open] .gate-meta {
+  margin-top: 6px;
 }
 </style>

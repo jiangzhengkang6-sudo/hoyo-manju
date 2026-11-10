@@ -65,22 +65,22 @@ const isNetwork = computed(() => props.error?.code === 'NETWORK_ERROR')
 
 <style scoped>
 .error-state {
-  border: 1px solid rgba(248, 113, 113, 0.32);
-  background: linear-gradient(180deg, rgba(248, 113, 113, 0.07), rgba(248, 113, 113, 0.02));
+  border: 1px solid rgba(224, 122, 106, 0.32);
+  background: linear-gradient(180deg, rgba(224, 122, 106, 0.07), rgba(224, 122, 106, 0.02));
   border-radius: var(--radius);
-  padding: 16px;
+  padding: var(--space-4);
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-3);
 }
 .error-state.compact {
-  padding: 12px;
-  gap: 8px;
+  padding: var(--space-3);
+  gap: var(--space-2);
 }
 .error-head {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
+  gap: var(--space-3);
 }
 .error-mark {
   width: 20px;
@@ -88,36 +88,36 @@ const isNetwork = computed(() => props.error?.code === 'NETWORK_ERROR')
   border-radius: 50%;
   display: grid;
   place-items: center;
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 700;
   background: var(--danger-soft);
   color: var(--danger);
-  border: 1px solid rgba(248, 113, 113, 0.4);
+  border: 1px solid rgba(224, 122, 106, 0.4);
   flex: 0 0 auto;
   margin-top: 2px;
 }
 .error-title {
-  font-size: 13.5px;
+  font-size: var(--fs-13);
   font-weight: 620;
-  color: #fecaca;
+  color: #f3bdb2;
 }
 .error-code {
-  font-size: 11px;
+  font-size: var(--fs-11);
   color: var(--text-2);
   letter-spacing: 0.04em;
 }
 .error-message {
-  font-size: 12.5px;
+  font-size: var(--fs-12);
   color: var(--text-1);
   word-break: break-word;
 }
 .error-hint {
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--text-2);
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(243, 237, 227, 0.03);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  padding: 8px 10px;
+  padding: var(--space-2) var(--space-3);
 }
 .error-issues {
   list-style: none;
@@ -125,17 +125,17 @@ const isNetwork = computed(() => props.error?.code === 'NETWORK_ERROR')
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  font-size: 12px;
+  gap: var(--space-2);
+  font-size: var(--fs-12);
   max-height: 180px;
   overflow: auto;
 }
 .error-issues li {
   display: flex;
-  gap: 8px;
-  padding: 5px 8px;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-2);
   border-radius: var(--radius-xs);
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(243, 237, 227, 0.03);
 }
 .issue-label {
   color: var(--warn);
@@ -151,11 +151,11 @@ const isNetwork = computed(() => props.error?.code === 'NETWORK_ERROR')
 .error-foot {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-3);
   flex-wrap: wrap;
 }
 .error-trace {
-  font-size: 11px;
+  font-size: var(--fs-11);
   color: var(--text-3);
   overflow: hidden;
   text-overflow: ellipsis;

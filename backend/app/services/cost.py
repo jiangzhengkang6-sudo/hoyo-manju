@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from sqlalchemy import func, select
@@ -10,6 +11,8 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.errors import QuotaExceeded
 from app.db.models import CostLedger, Job, JobStatus, Project, Episode
+
+logger = logging.getLogger("hoyomanju.cost")
 
 KIND_RESERVE = "RESERVE"
 KIND_SETTLE = "SETTLE"
@@ -24,10 +27,38 @@ def _sum(session: Session, kind: str, **filters: Any) -> int:
     return int(session.scalar(stmt) or 0)
 
 
-def quota_snapshot(session: Session, *, limit_cents: int | None = None) -> dict[str, int]:
+def cents_per_credit() -> float:
+    """1 个供应商积分折合多少分（人民币）。
+
+    ToAPIs 实测口径：1 积分 = $0.005（32.9652 积分 = $0.164826），
+    按 USD_CNY_RATE 折算后约 3.6 分。内部账本仍用「分」记（整数不丢精度），
+    只在展示层换算成积分，让界面数字和供应商后台对得上。
+    """
+    return max(settings.credit_usd_value * settings.usd_cny_rate * 100, 0.0001)
+
+
+def to_credits(cents: int | float) -> float:
+    """分 → 积分（保留 2 位小数，和供应商后台的显示精度一致）。"""
+    return round(float(cents) / cents_per_credit(), 2)
+
+
+def quota_snapshot(session: Session, *, limit_cents: int | None = None) -> dict[str, Any]:
     limit = settings.quota_limit_cents if limit_cents is None else limit_cents
+    # 优先用「积分」配额：用户按供应商的充值套餐填，界面才不会出现
+    # 「¥200 但不知道还能生成几次」这种对不上的数字。
+    if limit_cents is None and settings.quota_limit_credits > 0:
+        limit = int(round(settings.quota_limit_credits * cents_per_credit()))
     used = _sum(session, KIND_SETTLE)
-    reserved = _sum(session, KIND_RESERVE) + _sum(session, KIND_RELEASE)
+    # 预留只可能 >= 0：负数是历史重复释放留下的脏数据，
+    # 展示时夹到 0，别让它把「剩余额度」凭空放大。
+    raw_reserved = _sum(session, KIND_RESERVE) + _sum(session, KIND_RELEASE)
+    reserved = max(0, raw_reserved)
+    if raw_reserved < 0:
+        # 夹 0 只是不让用户看到负数，偏差仍在；不记日志的话，等下一次有并发任务时
+        # 这份负值会把可用额度算多（例如真冻结 100、账上 -50，就只有 50 被算进去）。
+        logger.warning(
+            "成本台账异常：冻结额度为负（%s 分），疑似某笔预留被重复释放", raw_reserved
+        )
     remaining = limit - used - reserved
     running = int(
         session.scalar(
@@ -38,11 +69,18 @@ def quota_snapshot(session: Session, *, limit_cents: int | None = None) -> dict[
         )
         or 0
     )
+    rate = cents_per_credit()
     return {
         "limit_cents": limit,
         "used_cents": used,
         "reserved_cents": reserved,
         "remaining_cents": remaining,
+        # 供应商口径（积分）：界面上以它为主，人民币作为辅助
+        "limit_credits": round(limit / rate, 2),
+        "used_credits": round(used / rate, 2),
+        "reserved_credits": round(reserved / rate, 2),
+        "remaining_credits": round(remaining / rate, 2),
+        "cents_per_credit": round(rate, 4),
         "concurrent_limit": settings.max_concurrent_jobs,
         "running_jobs": running,
     }
@@ -57,6 +95,35 @@ def check_quota(session: Session, need_cents: int) -> None:
             details={"need_cents": need_cents, **snap},
         )
 
+
+def outstanding_reserved(session: Session, job_id: str) -> int:
+    """该任务**当前仍未结清**的预留（台账口径，不看模型字段）。
+
+    为什么以台账为准：`job.cost_reserved_cents` 是内存里的一个数字，
+    任务被重跑/跨会话复用时很容易拿到旧值，于是同一笔预留被释放两次，
+    `reserved` 变成负数（配额被凭空放大）。台账是唯一事实来源。
+    """
+    # 会话关闭了 autoflush，必须先落库再聚合，否则看不到刚写入的那一条
+    session.flush()
+    total = session.scalar(
+        select(func.coalesce(func.sum(CostLedger.amount_cents), 0)).where(
+            CostLedger.job_id == job_id,
+            CostLedger.kind.in_([KIND_RESERVE, KIND_RELEASE]),
+        )
+    )
+    return max(0, int(total or 0))
+
+
+def _settled_times(session: Session, job_id: str) -> int:
+    session.flush()
+    return int(
+        session.scalar(
+            select(func.count(CostLedger.id)).where(
+                CostLedger.job_id == job_id, CostLedger.kind == KIND_SETTLE
+            )
+        )
+        or 0
+    )
 
 def reserve(
     session: Session,
@@ -93,12 +160,16 @@ def settle(
     stage: str = "",
     note: str = "",
 ) -> None:
-    """成功后按实际消耗结算，并全额释放该任务的预留。
+    """成功后按实际消耗结算，并释放该任务尚未结清的预留。
 
-    预留只是临时占用额度：结算时写入 SETTLE(+实际消耗) 并 RELEASE(-预留)，
-    这样 `used = ΣSETTLE`、`reserved = ΣRESERVE + ΣRELEASE` 两条口径始终自洽。
+    幂等：同一个任务被重复执行（工作流节点重试、worker 重复领取）时，
+    只记一次 SETTLE，避免「扣两次费」。
     """
-    reserved = job.cost_reserved_cents or 0
+    if _settled_times(session, job.id):
+        job.cost_settled_cents = int(job.cost_settled_cents or 0) or actual_cents
+        job.cost_reserved_cents = outstanding_reserved(session, job.id)
+        return
+    reserved = outstanding_reserved(session, job.id)
     job.cost_settled_cents = actual_cents
     if actual_cents > 0:
         session.add(
@@ -128,8 +199,9 @@ def settle(
 
 
 def release(session: Session, *, job: Job, reason: str = "任务失败或取消，释放预留") -> None:
-    reserved = job.cost_reserved_cents or 0
+    reserved = outstanding_reserved(session, job.id)
     if reserved <= 0:
+        job.cost_reserved_cents = 0
         return
     session.add(
         CostLedger(

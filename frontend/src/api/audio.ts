@@ -1,7 +1,10 @@
+import { apiUrl } from './base'
 import { http, requestText } from './client'
 import { asList } from './projects'
 import type {
   AudioTrack,
+  BgmEstimate,
+  BgmSuggestion,
   Job,
   SubtitleCue,
   TrackKind,
@@ -22,8 +25,8 @@ export const audioApi = {
   createVoice: (projectId: string, body: Partial<Voice> & { media_id?: string }) =>
     http.post<Voice>(`/projects/${projectId}/voices`, body),
 
-  /** 试听地址（直接给 <audio src>）。 */
-  voicePreviewUrl: (voiceId: string) => `/voices/${voiceId}/preview`,
+  /** 试听地址（直接给 <audio src>，必须带 /api/v1 前缀）。 */
+  voicePreviewUrl: (voiceId: string) => apiUrl(`/voices/${voiceId}/preview`),
 
   /**
    * FR-050「绑定前可试听」：后端按需合成并缓存试听音频，返回可播放地址。
@@ -56,12 +59,16 @@ export const audioApi = {
       `/episodes/${episodeId}/tts/lines`,
     ),
 
+  /** 调整**已生成**音频的语速（本地变速，不调用模型、不计费）。 */
+  ttsSpeed: (episodeId: string, trackId: string, speed: number) =>
+    http.post<TtsLine>(`/episodes/${episodeId}/tts/${trackId}/speed`, { speed }),
+
   /** §12-4：用上传的音频顶替某句台词（TTS 失败时的兜底）。 */
   ttsManual: (episodeId: string, body: { shot_no: number; line_index: number; media_id: string }) =>
     http.post<TtsLine>(`/episodes/${episodeId}/tts/manual`, body),
 
-  /** §12-4：跳过这些镜头的配音，继续预览/导出。 */
-  ttsSkip: (episodeId: string, body: { shot_nos: number[]; reason?: string }) =>
+  /** §12-4：跳过配音；带 line_index 时只跳过该镜的那一句。 */
+  ttsSkip: (episodeId: string, body: { shot_nos: number[]; reason?: string; line_index?: number }) =>
     http.post<{ skipped_track_ids: string[]; counts: Record<string, number> }>(
       `/episodes/${episodeId}/tts/skip`,
       body,
@@ -77,6 +84,53 @@ export const audioApi = {
 
   bgmDelete: (episodeId: string, trackId: string) =>
     http.del<void>(`/episodes/${episodeId}/bgm/${trackId}`),
+
+  /**
+   * 氛围音 / BGM 的成本预估（按生成秒数计费）。
+   * 传镜头参数时以这段镜头在时间线上的实际长度为准（可跨多个镜头共用）。
+   */
+  bgmEstimate: (
+    episodeId: string,
+    options: {
+      seconds?: number
+      shot_no?: number
+      shot_from?: number
+      shot_to?: number
+    } = {},
+  ) =>
+    http.get<BgmEstimate>(`/episodes/${episodeId}/bgm/estimate`, {
+      ...(options.seconds ? { seconds: options.seconds } : {}),
+      ...(options.shot_no ? { shot_no: options.shot_no } : {}),
+      ...(options.shot_from ? { shot_from: options.shot_from } : {}),
+      ...(options.shot_to ? { shot_to: options.shot_to } : {}),
+    }),
+
+  /**
+   * 按镜头内容生成氛围描述草稿（读分镜的场景/音效/情绪，不调模型、不扣费）。
+   */
+  bgmSuggest: (episodeId: string, shotFrom: number, shotTo?: number) =>
+    http.get<BgmSuggestion>(`/episodes/${episodeId}/bgm/suggest`, {
+      shot_from: shotFrom,
+      ...(shotTo ? { shot_to: shotTo } : {}),
+    }),
+
+  /**
+   * 生成一轨氛围音 / BGM（异步任务，成功后自动挂到时间线）。
+   * 不传镜头 = 整集垫乐；传 `shot_from/shot_to` = 覆盖这段镜头（长度按镜头裁）。
+   */
+  bgmGenerate: (
+    episodeId: string,
+    body: {
+      prompt: string
+      seconds?: number
+      shot_no?: number
+      shot_from?: number
+      shot_to?: number
+      volume_db?: number
+      fade_in_ms?: number
+      fade_out_ms?: number
+    },
+  ) => http.post<Job>(`/episodes/${episodeId}/bgm/generate`, body),
 
   /* ---- 字幕 ---- */
 

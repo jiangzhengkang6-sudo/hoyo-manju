@@ -155,6 +155,8 @@ class Project(Base, TimestampMixin):
     aspect_ratio: Mapped[str] = mapped_column(String(16), default="9:16")
     default_language: Mapped[str] = mapped_column(String(16), default="zh-CN")
     default_style_id: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    #: 统一语速：新建角色/从剧本同步角色时的初始 `voice_speed`（FR-051）
+    default_voice_speed: Mapped[float] = mapped_column(Float, default=1.0)
     status: Mapped[str] = mapped_column(String(24), default="ACTIVE")  # ACTIVE / ARCHIVED
 
     __table_args__ = (UniqueConstraint("user_id", "name", name="uq_project_name_per_user"),)
@@ -215,11 +217,19 @@ class Shot(Base, TimestampMixin):
 
 
 class CharacterAsset(Base, TimestampMixin):
-    """角色卡（spec_json + 主参考图）。"""
+    """角色卡（spec_json + 主参考图）。
+
+    `episode_id` 为空表示**项目级公共角色**（手工新增，所有剧集可见）；
+    非空表示从该集剧本抓取、只属于那一集 —— 同一个项目下可能有多集互不相干的
+    故事（异世界 / 刑侦），它们各自都有一个叫「陈默」的主角，不能合成一张卡。
+    """
 
     __tablename__ = "character_assets"
     id: Mapped[str] = _id("chr")
     project_id: Mapped[str] = mapped_column(String(48), ForeignKey("projects.id"), index=True)
+    episode_id: Mapped[str | None] = mapped_column(
+        String(48), ForeignKey("episodes.id"), nullable=True, index=True
+    )
     name: Mapped[str] = mapped_column(String(120))
     spec_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     primary_media_id: Mapped[str | None] = mapped_column(String(48), nullable=True)
@@ -230,7 +240,9 @@ class CharacterAsset(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(24), default=AssetStatus.DRAFT.value)
     is_main: Mapped[bool] = mapped_column(Boolean, default=True)
 
-    __table_args__ = (UniqueConstraint("project_id", "name", name="uq_character_name_per_project"),)
+    __table_args__ = (
+        UniqueConstraint("episode_id", "name", name="uq_character_name_per_episode"),
+    )
 
 
 class StyleAsset(Base, TimestampMixin):
@@ -472,6 +484,10 @@ class AudioTrack(Base, TimestampMixin):
     speed: Mapped[float] = mapped_column(Float, default=1.0)
     emotion: Mapped[str] = mapped_column(String(64), default="")
     provider: Mapped[str] = mapped_column(String(48), default="")
+    #: 该音轨对应「镜头台词数组」里的第几句（0 起）。
+    #: 没有它就只能按 start_ms 位置硬猜——中间有一句失败/被跳过时，
+    #: 后面的音轨会整体错位（状态表显示已生成，实际是上一句的音频）。
+    line_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     start_ms: Mapped[int] = mapped_column(Integer, default=0)
     end_ms: Mapped[int] = mapped_column(Integer, default=0)
     volume_db: Mapped[float] = mapped_column(Float, default=0.0)

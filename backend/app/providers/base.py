@@ -74,6 +74,10 @@ class ImageRequest:
     count: int = 2
     reference_media_ids: list[str] = field(default_factory=list)
     reference_uris: list[str] = field(default_factory=list)
+    #: 参考图的**本地文件路径**（本地存储时 `reference_uris` 只是相对签名路径，
+    #: 外部网关访问不到）。供应商侧需要先上传换公网 URL——不传等于没给参考图，
+    #: 角色一致性就只能靠提示词里的文字描述，同一个角色会被画成好几个人。
+    reference_paths: list[str] = field(default_factory=list)
     model: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -83,6 +87,9 @@ class VideoRequest:
     prompt: str
     image_uri: str = ""
     image_media_id: str = ""
+    #: 首帧的本地文件路径。toapis 这类网关**只收公网 URL**，
+    #: 本地素材必须先上传换 URL；只给 `image_uri`（相对签名路径）等于没给。
+    image_path: str = ""
     duration_ms: int = 4000
     motion_strength: float = 0.4
     camera_movement: str = "固定"
@@ -99,6 +106,14 @@ class SpeechRequest:
     speed: float = 1.0
     emotion: str = ""
     model: str = ""
+    #: 音色指令（形如「用低沉浑厚的成年男声朗读：」）。只给**不认 voice 参数**的
+    #: 供应商用（如通义 qwen-audio-…-tts-next），会拼在正文前面；认 voice 的供应商忽略。
+    style_prompt: str = ""
+    #: 输出格式 / 采样率 / 声道。留空表示不给供应商传，用它的默认值。
+    #: BGM 需要立体声 48k，逐句台词用默认即可。
+    output_format: str = ""
+    sample_rate: int = 0
+    channels: int = 0
 
 
 @dataclass(slots=True)
@@ -139,6 +154,7 @@ class ProviderResult:
         *,
         retryable: bool = False,
         raw: dict[str, Any] | None = None,
+        provider_job_id: str = "",
     ) -> "ProviderResult":
         return cls(
             ok=False,
@@ -147,6 +163,9 @@ class ProviderResult:
             error_message=message,
             retryable=retryable,
             raw_summary=raw or {},
+            # 任务已提交但没拿到产物时，网关侧可能已经计费；
+            # 把 id 留下来，用户才能去控制台核对，而不是只看到一句「失败」。
+            provider_job_id=provider_job_id,
         )
 
 

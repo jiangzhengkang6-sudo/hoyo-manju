@@ -99,6 +99,25 @@ export function formatCentsSigned(cents?: number | null): string {
   return `${sign}${formatCents(Math.abs(cents))}`
 }
 
+/**
+ * 分 → 供应商积分。
+ *
+ * ToAPIs 的 1 积分 = $0.005，按汇率折算约 3.6 分。界面上以积分为主，
+ * 这样「生成一条 4 秒视频消耗 33 积分」和供应商后台是同一个数，
+ * 不用心算「¥1.19 到底等于多少积分」。
+ */
+export function formatCredits(credits?: number | null): string {
+  if (credits === null || credits === undefined) return '—'
+  const value = Math.abs(credits) >= 100 ? credits.toFixed(0) : credits.toFixed(2)
+  return `${value} 积分`
+}
+
+/** 分 → 积分（四舍五入到 2 位，用于把旧接口的金额快速换成积分口径）。 */
+export function centsToCredits(cents?: number | null, centsPerCredit = 3.6): number {
+  if (cents === null || cents === undefined) return 0
+  return Math.round((cents / centsPerCredit) * 100) / 100
+}
+
 /** 流水类型（API.md §13：RESERVE 预留 / SETTLE 结算 / RELEASE 释放）。 */
 export const LEDGER_KIND_LABEL: Record<string, string> = {
   RESERVE: '预留',

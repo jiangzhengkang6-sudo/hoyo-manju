@@ -46,7 +46,15 @@ PRICE_TABLE: dict[str, dict[str, int]] = {
     "deepseek:deepseek-chat": {"1k_tokens": 1},
     "gemini:gemini-nano-banana-2.1": {"image": 25},
     "grok:grok-video-1.5": {"second": 100},
-    "qwen:qwen-audio-3.1-tts-next": {"1k_chars": 3},
+    # 网关视频模型（seedance 系列实测 480p 结算 $0.033/秒 ≈ 24 分；这里按 720p 略高留量）
+    "grok:seedance-2-mini": {"second": 30},
+    "grok:seedance-2-fast": {"second": 45},
+    "grok:seedance-2": {"second": 70},
+    # 台词按千字估算；BGM/氛围音按生成时长（秒）估算。
+    # 实测：10 秒环境音一单 ≈ 2.5 分（input 249 / output 2000 tokens），故 0.25 分/秒。
+    "qwen:qwen-audio-3.1-tts-next": {"1k_chars": 3, "second": 0.25},
+    # Mock 语音：按秒也留一条价，保证测试与真实供应商的估算口径一致
+    "mock:mock-tts-v1": {"1k_chars": 10, "second": 1},
 }
 
 

@@ -4,6 +4,7 @@
  * 流程：保存故事 → 触发 StoryAgent（异步 job）→ 校验剧本 → 门控确认/驳回/重做。
  */
 import { computed, onMounted, ref, watch } from 'vue'
+import { RouterLink } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { useEpisodeStore } from '@/stores/episode'
 import { useToastStore } from '@/stores/toast'
@@ -21,12 +22,15 @@ import {
 } from '@/api/story'
 import { formatDateTime, formatDuration } from '@/utils/format'
 import { formatCents } from '@/api/cost'
+import { suggestShot } from '@/api/shots'
 import { useAutosave, clearDraft } from '@/composables/useAutosave'
 import GateCard from '@/components/GateCard.vue'
+import StageHead from '@/components/StageHead.vue'
 import JobInline from '@/components/JobInline.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import SkeletonBlock from '@/components/SkeletonBlock.vue'
 import ErrorState from '@/components/ErrorState.vue'
+import ModalDialog from '@/components/ModalDialog.vue'
 import { ApiError, toApiError } from '@/api/errors'
 import type {
   Job,
@@ -69,6 +73,23 @@ const busy = ref(false)
 const gateBusy = ref(false)
 const scriptError = ref<ApiError | null>(null)
 const notice = ref('')
+
+/* ---- 单镜「按大纲生成」：AI 先写一版，用户在弹窗里改完再进草稿 ---- */
+const suggestOpen = ref(false)
+const suggestBusy = ref(false)
+const suggestShotNo = ref<number | null>(null)
+const suggestForm = ref({
+  instruction: '',
+  duration_ms: 4000,
+  composition: '中景',
+  camera_movement: '固定',
+  characters: '',
+  action: '',
+  narration: '',
+  dialogueText: '',
+  image_prompt: '',
+  negative_prompt: '',
+})
 
 const storyRemaining = computed(() => STORY_TEXT_MAX - storyText.value.length)
 const overLimit = computed(() => storyRemaining.value < 0)
@@ -240,6 +261,23 @@ async function loadScript(): Promise<void> {
 onMounted(async () => {
   await Promise.all([loadStory(), loadVersions(), loadScript()])
 })
+
+/**
+ * 剧本生成成功的那一刻，把剧本与版本列表重新拉一遍。
+ *
+ * 之前只靠 `store.trackJob()` 更新任务进度条：用户看到「生成成功 100%」，
+ * 下方却仍然是「剧本还没有生成 / 版本记录 0 条」，必须手动刷新整页才看得到 ——
+ * 因为 SSE 只推任务状态，页面自己不会重新取剧本。
+ */
+watch(
+  () => storyJob.value?.status,
+  async (status, prev) => {
+    if (status !== 'SUCCEEDED' || prev === status) return
+    await Promise.all([loadScript(), loadVersions()])
+    // 顺带刷新工作流/事件，避免左栏进度条停在旧状态
+    await Promise.resolve(store.refreshLive()).catch(() => undefined)
+  },
+)
 
 async function saveStory(): Promise<void> {
   if (!episodeId.value) return
@@ -423,6 +461,111 @@ function resetDraft(): void {
   notice.value = ''
 }
 
+/* ------------------------------------------------------------------ *
+ * 单镜「按大纲生成」：AI 先写一版，用户在弹窗里改，确认后写进草稿
+ * ------------------------------------------------------------------ */
+
+interface ShotDraft {
+  shot_no: number
+  [key: string]: unknown
+}
+
+function openSuggest(shot: ShotDraft): void {
+  suggestShotNo.value = Number(shot.shot_no)
+  const dialogue = (shot.dialogue ?? []) as { character?: string; text?: string }[]
+  suggestForm.value = {
+    instruction: '',
+    duration_ms: Number(shot.duration_ms ?? 4000),
+    composition: String(shot.composition ?? '中景'),
+    camera_movement: String(shot.camera_movement ?? '固定'),
+    characters: ((shot.characters ?? []) as string[]).join('、'),
+    action: String(shot.action ?? ''),
+    narration: String(shot.narration ?? ''),
+    dialogueText: dialogue
+      .map((line) => `${line.character ?? ''}：${line.text ?? ''}`)
+      .join('\n'),
+    image_prompt: String(shot.image_prompt ?? ''),
+    negative_prompt: String(shot.negative_prompt ?? ''),
+  }
+  suggestOpen.value = true
+}
+
+async function runSuggest(): Promise<void> {
+  if (!episodeId.value || suggestShotNo.value === null) return
+  suggestBusy.value = true
+  try {
+    const result = await suggestShot(
+      episodeId.value,
+      suggestShotNo.value,
+      suggestForm.value.instruction,
+    )
+    const s = result.suggestion
+    suggestForm.value = {
+      ...suggestForm.value,
+      duration_ms: s.duration_ms,
+      composition: s.composition,
+      camera_movement: s.camera_movement,
+      characters: s.characters.join('、'),
+      action: s.action,
+      narration: s.narration,
+      // 台词统一成「角色：台词」一行一条，便于直接改
+      dialogueText: s.dialogue.map((line) => `${line.character}：${line.text}`).join('\n'),
+      image_prompt: s.image_prompt,
+      negative_prompt: s.negative_prompt,
+    }
+    toast.success(
+      '已生成建议',
+      result.cost_cents ? `消耗 ${formatCents(result.cost_cents)}，可继续修改后应用` : '可继续修改后应用',
+    )
+  } catch (err) {
+    reportError(err, '按大纲生成镜头')
+  } finally {
+    suggestBusy.value = false
+  }
+}
+
+function parseDialogueText(text: string): { character: string; text: string }[] {
+  return text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const idx = line.search(/[:：]/)
+      if (idx <= 0) return { character: '', text: line }
+      return { character: line.slice(0, idx).trim(), text: line.slice(idx + 1).trim() }
+    })
+    .filter((line) => line.character && line.text)
+}
+
+function applySuggestion(): void {
+  const json = parsedDraft.value as { shots?: ShotDraft[] } | null
+  if (!json || suggestShotNo.value === null) {
+    toast.warn('无法应用', '剧本 JSON 解析失败，请先在「JSON 编辑」里修正')
+    return
+  }
+  const target = (json.shots ?? []).find((s) => Number(s.shot_no) === Number(suggestShotNo.value))
+  if (!target) {
+    toast.warn('无法应用', '草稿里找不到这个分镜，请刷新后重试')
+    return
+  }
+  const form = suggestForm.value
+  target.duration_ms = Number(form.duration_ms) || target.duration_ms
+  target.composition = form.composition
+  target.camera_movement = form.camera_movement
+  target.characters = form.characters
+    .split(/[、,，\s]+/)
+    .map((name) => name.trim())
+    .filter(Boolean)
+  target.action = form.action
+  target.narration = form.narration
+  target.dialogue = parseDialogueText(form.dialogueText)
+  target.image_prompt = form.image_prompt
+  target.negative_prompt = form.negative_prompt
+  draft.value = JSON.stringify(json, null, 2)
+  suggestOpen.value = false
+  toast.success('已填入草稿', '检查无误后点「保存剧本」生效')
+}
+
 /* ---------------- 门控 ---------------- */
 
 async function approve(): Promise<void> {
@@ -471,6 +614,11 @@ function handleGateError(err: unknown): void {
 
 <template>
   <div class="stage">
+    <StageHead
+      index="01"
+      title="故事与剧本"
+      description="从一句话创意到可拍摄的脚本：先生成大纲与分镜台词，再逐镜打磨画面提示。"
+    />
     <GateCard
       :gate="pendingGate"
       :workflow="workflow"
@@ -496,7 +644,7 @@ function handleGateError(err: unknown): void {
           <h2 class="title-md">故事输入</h2>
           <span v-if="story?.version" class="badge mono">v{{ story.version }}</span>
         </div>
-        <div class="card-body col" style="gap: 14px">
+        <div class="card-body col" style="gap: var(--space-4)">
           <div class="field">
             <label class="label" for="story-type">输入方式</label>
             <select id="story-type" v-model="inputType" class="select">
@@ -518,7 +666,7 @@ function handleGateError(err: unknown): void {
             />
             <div class="row-between">
               <span class="hint">长度上限 {{ STORY_TEXT_MAX }} 字（API.md §4）</span>
-              <span class="row" style="gap: 8px">
+              <span class="row" style="gap: var(--space-2)">
                 <!-- FR-003：自动保存状态，来自真实的写操作活动 -->
                 <span class="autosave-state" :class="`is-${autosave.state.value}`">
                   {{ AUTO_SAVE_LABEL[autosave.state.value] ?? autosave.state.value }}
@@ -532,7 +680,7 @@ function handleGateError(err: unknown): void {
             <!-- FR-003：本地草稿与服务器版本不一致时提示取舍，不静默覆盖 -->
             <div v-if="autosave.conflict.value" class="draft-conflict">
               <span class="draft-msg">{{ draftNotice }}</span>
-              <span class="row" style="gap: 6px">
+              <span class="row" style="gap: var(--space-2)">
                 <button type="button" class="btn btn-sm btn-primary" @click="acceptLocalDraft">
                   用本地草稿
                 </button>
@@ -714,7 +862,7 @@ function handleGateError(err: unknown): void {
         </div>
       </div>
 
-      <div class="card-body col" style="gap: 14px">
+      <div class="card-body col" style="gap: var(--space-4)">
         <ErrorState v-if="scriptError" :error="scriptError" context="加载剧本" compact @retry="loadScript" />
 
         <SkeletonBlock v-else-if="loadingScript && !script" :rows="5" />
@@ -763,7 +911,18 @@ function handleGateError(err: unknown): void {
             </div>
 
             <div class="outline-block">
-              <span class="section-title">角色（{{ script.story_json.story_bible?.characters?.length ?? 0 }}）</span>
+              <div class="row-between">
+                <span class="section-title">角色（{{ script.story_json.story_bible?.characters?.length ?? 0 }}）</span>
+                <RouterLink
+                  class="btn btn-sm btn-ghost"
+                  :to="{ name: 'episode-characters', params: { episodeId } }"
+                >
+                  去角色卡修改 →
+                </RouterLink>
+              </div>
+              <p class="tiny dim">
+                剧本生成时会自动把这里的人物抓成角色卡（身份／外貌／服饰等设定都已带入），可随时修改。
+              </p>
               <div v-if="script.story_json.story_bible?.characters?.length" class="char-grid">
                 <div v-for="ch in script.story_json.story_bible.characters" :key="ch.name" class="char-mini">
                   <div class="row-between">
@@ -813,6 +972,7 @@ function handleGateError(err: unknown): void {
                   <th style="width: 80px">运镜</th>
                   <th style="width: 130px">角色</th>
                   <th>动作 / 台词</th>
+                  <th style="width: 96px" />
                 </tr>
               </thead>
               <tbody>
@@ -838,10 +998,20 @@ function handleGateError(err: unknown): void {
                       </span>
                     </div>
                   </td>
+                  <td>
+                    <button
+                      type="button"
+                      class="btn btn-sm btn-ghost"
+                      title="根据大纲为这一镜生成内容，可先改再应用"
+                      @click="openSuggest(shot)"
+                    >
+                      AI 生成
+                    </button>
+                  </td>
                 </tr>
               </tbody>
             </table>
-            <p v-if="!script.story_json.shots?.length" class="tiny dim" style="padding: 12px">
+            <p v-if="!script.story_json.shots?.length" class="tiny dim" style="padding: var(--space-3)">
               剧本暂无分镜，可在「JSON 编辑」中补充或重新生成。
             </p>
           </div>
@@ -929,24 +1099,101 @@ function handleGateError(err: unknown): void {
         </ul>
       </div>
     </section>
+
+    <!-- 单镜「按大纲生成」：AI 先写一版，用户改完再进草稿 -->
+    <ModalDialog
+      :open="suggestOpen"
+      :title="`按大纲生成 · 镜 #${suggestShotNo ?? ''}`"
+      :width="720"
+      @close="suggestOpen = false"
+    >
+      <div class="suggest-form">
+        <div class="field">
+          <label class="label" for="sg-instr">额外要求（可选）</label>
+          <input
+            id="sg-instr"
+            v-model="suggestForm.instruction"
+            class="input"
+            placeholder="例如：这一镜要更紧张，突出反派的压迫感"
+          />
+        </div>
+        <div class="row-wrap">
+          <button type="button" class="btn btn-sm btn-primary" :disabled="suggestBusy" @click="runSuggest">
+            {{ suggestBusy ? '生成中…' : '让 AI 生成一版' }}
+          </button>
+          <span class="tiny dim">生成的是草稿，改完点「应用到草稿」，再点「保存剧本」才生效。</span>
+        </div>
+        <div class="suggest-grid">
+          <div class="field">
+            <label class="label">时长（毫秒）</label>
+            <input
+              v-model.number="suggestForm.duration_ms"
+              class="input"
+              type="number"
+              min="1000"
+              max="15000"
+              step="100"
+            />
+          </div>
+          <div class="field">
+            <label class="label">构图</label>
+            <select v-model="suggestForm.composition" class="select">
+              <option v-for="c in COMPOSITIONS" :key="c" :value="c">{{ c }}</option>
+            </select>
+          </div>
+          <div class="field">
+            <label class="label">运镜</label>
+            <select v-model="suggestForm.camera_movement" class="select">
+              <option v-for="m in CAMERA_MOVEMENTS" :key="m" :value="m">{{ m }}</option>
+            </select>
+          </div>
+        </div>
+        <div class="field">
+          <label class="label">出场角色（用「、」分隔）</label>
+          <input v-model="suggestForm.characters" class="input" />
+        </div>
+        <div class="field">
+          <label class="label">动作描述</label>
+          <textarea v-model="suggestForm.action" class="textarea" rows="3" />
+        </div>
+        <div class="field">
+          <label class="label">台词（每行「角色：台词」）</label>
+          <textarea v-model="suggestForm.dialogueText" class="textarea mono-input" rows="3" />
+        </div>
+        <div class="field">
+          <label class="label">旁白</label>
+          <input v-model="suggestForm.narration" class="input" />
+        </div>
+        <div class="field">
+          <label class="label">画面提示词</label>
+          <textarea v-model="suggestForm.image_prompt" class="textarea" rows="3" />
+        </div>
+        <div class="field">
+          <label class="label">负面提示词</label>
+          <input v-model="suggestForm.negative_prompt" class="input" />
+        </div>
+      </div>
+      <template #footer>
+        <button type="button" class="btn btn-ghost" @click="suggestOpen = false">取消</button>
+        <button type="button" class="btn btn-primary" :disabled="suggestBusy" @click="applySuggestion">
+          应用到草稿
+        </button>
+      </template>
+    </ModalDialog>
   </div>
 </template>
 
 <style scoped>
-.stage {
+/* 单镜「按大纲生成」弹窗 */
+.suggest-form {
   display: flex;
   flex-direction: column;
-  gap: var(--gap);
+  gap: var(--space-3);
 }
-.two-col {
+.suggest-grid {
   display: grid;
-  grid-template-columns: 1.35fr 1fr;
-  gap: var(--gap);
-}
-@media (max-width: 1080px) {
-  .two-col {
-    grid-template-columns: 1fr;
-  }
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
 }
 .over {
   color: var(--danger);
@@ -957,18 +1204,18 @@ function handleGateError(err: unknown): void {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px 14px;
+  gap: var(--space-2) 14px;
   margin-top: 6px;
-  padding: 6px 10px;
+  padding: var(--space-2) var(--space-3);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm, 6px);
   background: var(--bg-soft, transparent);
-  font-size: 12px;
+  font-size: var(--fs-12);
 }
 .estimate-item {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: var(--space-2);
 }
 .estimate-warn {
   margin-left: auto;
@@ -976,17 +1223,17 @@ function handleGateError(err: unknown): void {
   border-radius: 999px;
   border: 1px solid var(--warn, #b8860b);
   color: var(--warn, #b8860b);
-  font-size: 11px;
+  font-size: var(--fs-11);
   white-space: nowrap;
 }
 
 /* FR-003 自动保存状态与草稿冲突 */
 .autosave-state {
-  font-size: 11px;
-  color: var(--dim);
+  font-size: var(--fs-11);
+  color: var(--text-2);
 }
 .autosave-state.is-saved {
-  color: var(--ok, #34d399);
+  color: var(--ok, var(--ok));
 }
 .autosave-state.is-error {
   color: var(--danger);
@@ -999,15 +1246,15 @@ function handleGateError(err: unknown): void {
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--space-2);
   margin-top: 6px;
-  padding: 7px 10px;
+  padding: var(--space-2) var(--space-3);
   border: 1px solid var(--warn, #b8860b);
   border-radius: var(--radius-sm, 6px);
   background: rgba(184, 134, 11, 0.08);
 }
 .draft-msg {
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--text-1);
 }
 .analysis {
@@ -1015,7 +1262,7 @@ function handleGateError(err: unknown): void {
   padding-top: 12px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
 }
 .version-list {
   list-style: none;
@@ -1023,22 +1270,22 @@ function handleGateError(err: unknown): void {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: var(--space-2);
   max-height: 260px;
   overflow: auto;
 }
 .version-item {
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 7px 9px;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--panel-2);
 }
 .tabs {
   display: flex;
-  gap: 3px;
+  gap: var(--space-1);
   background: var(--bg-1);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
@@ -1047,9 +1294,9 @@ function handleGateError(err: unknown): void {
 .tab {
   background: transparent;
   border: 0;
-  padding: 5px 11px;
+  padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-xs);
-  font-size: 12.5px;
+  font-size: var(--fs-12);
   color: var(--text-2);
   cursor: pointer;
   transition: all var(--dur) var(--ease);
@@ -1069,24 +1316,24 @@ function handleGateError(err: unknown): void {
 .outline-block {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 12px;
+  gap: var(--space-2);
+  padding: var(--space-3);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--bg-1);
 }
 .char-grid {
   display: grid;
-  gap: 8px;
+  gap: var(--space-2);
 }
 .char-mini {
-  padding: 8px 10px;
+  padding: var(--space-2) var(--space-3);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--panel-2);
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--space-1);
 }
 .scene-list {
   list-style: none;
@@ -1094,15 +1341,15 @@ function handleGateError(err: unknown): void {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-2);
 }
 .scene-list li {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 5px 8px;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-2);
   border-radius: var(--radius-xs);
-  background: rgba(255, 255, 255, 0.025);
+  background: rgba(243, 237, 227, 0.025);
 }
 .shots-table-wrap {
   overflow: auto;
@@ -1113,7 +1360,7 @@ function handleGateError(err: unknown): void {
 .dialogue {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--space-1);
   margin-top: 5px;
   padding-left: 8px;
   border-left: 2px solid var(--line-accent);
@@ -1124,22 +1371,22 @@ function handleGateError(err: unknown): void {
 .json-editor {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-3);
 }
 .validation {
   border-radius: var(--radius-sm);
-  padding: 10px 12px;
+  padding: var(--space-3) var(--space-3);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
   border: 1px solid var(--line);
 }
 .validation.ok {
-  border-color: rgba(52, 211, 153, 0.35);
+  border-color: rgba(111, 191, 147, 0.35);
   background: var(--ok-soft);
 }
 .validation.bad {
-  border-color: rgba(248, 113, 113, 0.35);
+  border-color: rgba(224, 122, 106, 0.35);
   background: var(--danger-soft);
 }
 .validation-list {
@@ -1148,13 +1395,13 @@ function handleGateError(err: unknown): void {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
   max-height: 160px;
   overflow: auto;
 }
 .validation-list li {
   display: flex;
-  gap: 8px;
+  gap: var(--space-2);
 }
 .validation-list .mono {
   color: var(--warn);
@@ -1169,17 +1416,17 @@ function handleGateError(err: unknown): void {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: var(--space-2);
   max-height: 300px;
   overflow: auto;
 }
 .log-item {
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 6px 9px;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-sm);
-  background: rgba(255, 255, 255, 0.025);
+  background: rgba(243, 237, 227, 0.025);
   border: 1px solid var(--line);
 }
 </style>

@@ -9,7 +9,7 @@ import { useEpisodeStore } from '@/stores/episode'
 import { useConfigStore } from '@/stores/config'
 import { useToastStore } from '@/stores/toast'
 import { downloadFile, reportError } from '@/api/client'
-import { jobsApi } from '@/api/jobs'
+import { cancelJob as cancelJobRequest, jobsApi } from '@/api/jobs'
 import {
   EXPORT_KIND_LABEL,
   EXPORT_STATUS_LABEL,
@@ -20,6 +20,7 @@ import { fetchApprovals, settingsApi } from '@/api/settings'
 import { formatDateTime, formatDuration, formatSeconds, percent, relativeTime } from '@/utils/format'
 import { ApiError, toApiError } from '@/api/errors'
 import GateCard from '@/components/GateCard.vue'
+import StageHead from '@/components/StageHead.vue'
 import JobInline from '@/components/JobInline.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import ErrorState from '@/components/ErrorState.vue'
@@ -197,12 +198,17 @@ function track(job: Job): void {
   store.trackJob(job)
 }
 
-async function renderPreview(): Promise<void> {
+async function renderPreview(partial = false): Promise<void> {
   if (!episodeId.value) return
   busy.value = true
   try {
-    track(await renderApi.preview(episodeId.value, { watermark: watermark.value }))
-    toast.info('预览合成任务已提交', `码率 ${config.previewBitrateKbps}kbps`)
+    track(
+      await renderApi.preview(episodeId.value, { watermark: watermark.value, partial }),
+    )
+    toast.info(
+      partial ? '部分预览已提交（只含已就绪镜头）' : '预览合成任务已提交',
+      partial ? '未就绪的镜头会自动跳过，先看已完成的那几段' : `码率 ${config.previewBitrateKbps}kbps`,
+    )
   } catch {
     /* api 层已提示 */
   } finally {
@@ -267,8 +273,8 @@ async function retryJob(id: string): Promise<void> {
 
 async function cancelJob(id: string): Promise<void> {
   try {
-    const res = await jobsApi.cancel(id)
-    if (res.job) store.trackJob(res.job)
+    const job = await cancelJobRequest(id)
+    if (job) store.trackJob(job)
   } catch {
     /* api 层已提示 */
   }
@@ -321,6 +327,11 @@ function handleGateError(err: unknown): void {
 
 <template>
   <div class="stage">
+    <StageHead
+      index="06"
+      title="预览与导出"
+      description="合成整集并检查 AIGC 标识，最后打包导出成片。"
+    />
     <GateCard
       :gate="pendingGate"
       :workflow="workflow"
@@ -356,7 +367,7 @@ function handleGateError(err: unknown): void {
             </button>
           </div>
         </div>
-        <div class="card-body col" style="gap: 14px">
+        <div class="card-body col" style="gap: var(--space-4)">
           <SkeletonBlock v-if="loading && !timeline" :rows="4" />
           <ErrorState
             v-else-if="loadError && !timeline"
@@ -405,7 +416,6 @@ function handleGateError(err: unknown): void {
               </div>
               <ul v-if="validation.errors.length" class="validation-list">
                 <li v-for="(e, i) in validation.errors" :key="i">
-                  <span class="mono tiny">{{ e.code }}</span>
                   <span v-if="e.shot_no != null" class="badge mono">#{{ e.shot_no }}</span>
                   <span v-if="e.track" class="badge">{{ e.track }}</span>
                   <span class="tiny grow">{{ e.message }}</span>
@@ -413,13 +423,12 @@ function handleGateError(err: unknown): void {
               </ul>
               <ul v-if="validation.warnings.length" class="validation-list warn">
                 <li v-for="(w, i) in validation.warnings" :key="i">
-                  <span class="mono tiny">{{ w.code }}</span>
                   <span class="tiny grow">{{ w.message }}</span>
                 </li>
               </ul>
             </div>
 
-            <table class="table">
+            <table v-if="clips.length" class="table">
               <thead>
                 <tr>
                   <th style="width: 60px">镜号</th>
@@ -434,7 +443,7 @@ function handleGateError(err: unknown): void {
                   <td class="mono">#{{ clip.shot_no }}</td>
                   <td class="mono dim">{{ formatSeconds((clip.start_ms ?? 0) / 1000) }}</td>
                   <td class="mono">{{ formatDuration(clip.duration_ms) }}</td>
-                  <td class="tiny dim mono">{{ clip.video_media_id ?? '—' }}</td>
+                  <td class="tiny dim">{{ clip.video_media_id ? '片段已就绪' : '—' }}</td>
                   <td>
                     <span v-if="clip.skipped" class="badge badge-warn">跳过 · {{ clip.fallback ?? '—' }}</span>
                     <span v-else-if="clip.video_media_id" class="badge badge-ok">就绪</span>
@@ -450,10 +459,10 @@ function handleGateError(err: unknown): void {
       <div class="col" style="gap: var(--gap)">
         <section class="card">
           <div class="card-head">
-            <h2 class="title-md">预览与导出</h2>
+            <h2 class="title-md">合成与导出</h2>
             <span class="mono tiny dim">预览码率 {{ config.previewBitrateKbps }}kbps</span>
           </div>
-          <div class="card-body col" style="gap: 12px">
+          <div class="card-body col" style="gap: var(--space-3)">
             <label class="checkbox">
               <input v-model="watermark" type="checkbox" />
               <span class="small">添加 AIGC 水印</span>
@@ -466,7 +475,7 @@ function handleGateError(err: unknown): void {
                   {{ preset.label }}<template v-if="preset.meta"> · {{ preset.meta }}</template>
                 </option>
               </select>
-              <span class="hint">预设来自 /config/limits.export_presets</span>
+              <span class="hint">预设由后台配置下发</span>
             </div>
 
             <div class="row-wrap">
@@ -475,9 +484,18 @@ function handleGateError(err: unknown): void {
                 class="btn"
                 :disabled="busy || !canExport"
                 :title="canExport ? '' : '内容被拦截，禁止导出'"
-                @click="renderPreview"
+                @click="renderPreview(false)"
               >
                 生成预览
+              </button>
+              <button
+                type="button"
+                class="btn btn-ghost"
+                :disabled="busy || !canExport"
+                :title="canExport ? '' : '内容被拦截，禁止导出'"
+                @click="renderPreview(true)"
+              >
+                只预览已就绪镜头
               </button>
               <button
                 type="button"
@@ -504,7 +522,12 @@ function handleGateError(err: unknown): void {
             </p>
 
             <div v-if="latestPreview" class="preview-player">
-              <span class="section-title">最新预览</span>
+              <div class="row-wrap">
+                <span class="section-title">最新预览</span>
+                <span v-if="latestPreview.manifest?.partial" class="badge badge-warn">
+                  部分预览 · 只含已就绪镜头
+                </span>
+              </div>
               <MediaThumb :media-id="latestPreview.media_id" :url="latestPreview.url" kind="video" />
             </div>
           </div>
@@ -550,7 +573,7 @@ function handleGateError(err: unknown): void {
               {{ canExport ? '可导出' : '已禁止导出' }}
             </span>
           </div>
-          <div class="card-body col" style="gap: 12px">
+          <div class="card-body col" style="gap: var(--space-3)">
             <!-- §12-8：被拦截时必须说明「为什么挡、怎么解」，而不是只给一个 422 -->
             <div v-if="!canExport" class="gate-block">
               <strong>有 {{ unresolved.length }} 项内容未通过安全检查，已禁止确认与导出</strong>
@@ -580,7 +603,7 @@ function handleGateError(err: unknown): void {
                 </li>
               </ul>
 
-              <div v-if="appealTarget" class="appeal-form col" style="gap: 8px">
+              <div v-if="appealTarget" class="appeal-form col" style="gap: var(--space-2)">
                 <div class="tiny dim">
                   申诉素材 <span class="mono">{{ appealTarget }}</span>
                 </div>
@@ -731,27 +754,11 @@ function handleGateError(err: unknown): void {
 </template>
 
 <style scoped>
-.stage {
-  display: flex;
-  flex-direction: column;
-  gap: var(--gap);
-}
-.two-col {
-  display: grid;
-  grid-template-columns: 1.45fr 1fr;
-  gap: var(--gap);
-  align-items: start;
-}
-@media (max-width: 1120px) {
-  .two-col {
-    grid-template-columns: 1fr;
-  }
-}
 .timeline-bar {
   display: flex;
-  gap: 2px;
+  gap: var(--space-1);
   height: 44px;
-  padding: 4px;
+  padding: var(--space-1);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--bg-1);
@@ -761,11 +768,11 @@ function handleGateError(err: unknown): void {
   flex: 0 0 auto;
   min-width: 10px;
   border-radius: 4px;
-  background: linear-gradient(180deg, rgba(56, 189, 248, 0.55), rgba(167, 139, 250, 0.55));
+  background: linear-gradient(180deg, rgba(224, 138, 60, 0.55), rgba(201, 116, 58, 0.55));
   display: grid;
   place-items: center;
-  font-size: 10px;
-  color: #06121c;
+  font-size: var(--fs-11);
+  color: var(--accent-ink);
   overflow: hidden;
   transition: filter var(--dur) var(--ease);
 }
@@ -775,14 +782,14 @@ function handleGateError(err: unknown): void {
 .timeline-clip.skipped {
   background: repeating-linear-gradient(
     45deg,
-    rgba(251, 191, 36, 0.5),
-    rgba(251, 191, 36, 0.5) 5px,
-    rgba(251, 191, 36, 0.24) 5px,
-    rgba(251, 191, 36, 0.24) 10px
+    rgba(232, 203, 109, 0.5),
+    rgba(232, 203, 109, 0.5) 5px,
+    rgba(232, 203, 109, 0.24) 5px,
+    rgba(232, 203, 109, 0.24) 10px
   );
 }
 .timeline-clip.missing {
-  background: rgba(248, 113, 113, 0.35);
+  background: rgba(224, 122, 106, 0.35);
 }
 .timeline-empty {
   display: grid;
@@ -791,18 +798,18 @@ function handleGateError(err: unknown): void {
 }
 .validation {
   border-radius: var(--radius-sm);
-  padding: 10px 12px;
+  padding: var(--space-3) var(--space-3);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
   border: 1px solid var(--line);
 }
 .validation.ok {
-  border-color: rgba(52, 211, 153, 0.35);
+  border-color: rgba(111, 191, 147, 0.35);
   background: var(--ok-soft);
 }
 .validation.bad {
-  border-color: rgba(248, 113, 113, 0.35);
+  border-color: rgba(224, 122, 106, 0.35);
   background: var(--danger-soft);
 }
 .validation-list {
@@ -811,14 +818,14 @@ function handleGateError(err: unknown): void {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: var(--space-2);
   max-height: 180px;
   overflow: auto;
 }
 .validation-list li {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
 }
 .validation-list .mono {
   color: var(--warn);
@@ -830,7 +837,7 @@ function handleGateError(err: unknown): void {
 .preview-player {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
 }
 .approval-list {
   list-style: none;
@@ -838,15 +845,15 @@ function handleGateError(err: unknown): void {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
   max-height: 260px;
   overflow: auto;
 }
 .approval-item {
   display: flex;
   flex-direction: column;
-  gap: 3px;
-  padding: 8px 10px;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--panel-2);
@@ -862,8 +869,8 @@ function handleGateError(err: unknown): void {
 .gate-block {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 10px 12px;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-3);
   border: 1px solid var(--danger);
   border-radius: 8px;
   background: color-mix(in srgb, var(--danger) 8%, transparent);
@@ -874,12 +881,12 @@ function handleGateError(err: unknown): void {
   list-style: none;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-2);
 }
 .gate-list li {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   flex-wrap: wrap;
 }
 .appeal-form {
@@ -892,11 +899,11 @@ function handleGateError(err: unknown): void {
   list-style: none;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-2);
 }
 .appeal-list li {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
 }
 </style>

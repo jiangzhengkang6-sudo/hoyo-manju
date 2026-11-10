@@ -21,6 +21,7 @@ import {
   fetchQuota,
   formatCents,
   formatCentsSigned,
+  formatCredits,
   ledgerKindLabel,
   ledgerKindTone,
   stageCostLabel,
@@ -321,22 +322,30 @@ onMounted(async () => {
             <div class="stat-row">
               <StatTile
                 label="剩余配额"
-                :value="quota ? formatCents(quota.remaining_cents) : '—'"
+                :value="quota ? formatCredits(quota.remaining_credits) : '—'"
                 tone="accent"
-                hint="可用余额"
+                :hint="quota ? `≈ ${formatCents(quota.remaining_cents)}` : '可用余额'"
               />
               <StatTile
                 label="已用"
-                :value="quota ? formatCents(quota.used_cents) : '—'"
-                hint="已结算支出"
+                :value="quota ? formatCredits(quota.used_credits) : '—'"
+                :hint="quota ? `≈ ${formatCents(quota.used_cents)} · 已结算` : '已结算支出'"
               />
               <StatTile
                 label="已预留"
-                :value="quota ? formatCents(quota.reserved_cents) : '—'"
+                :value="quota ? formatCredits(quota.reserved_credits) : '—'"
                 tone="warn"
-                hint="进行中任务冻结"
+                :hint="
+                  quota
+                    ? `≈ ${formatCents(quota.reserved_cents)} · 进行中任务冻结`
+                    : '进行中任务冻结'
+                "
               />
-              <StatTile label="总配额" :value="quota ? formatCents(quota.limit_cents) : '—'" />
+              <StatTile
+                label="总配额"
+                :value="quota ? formatCredits(quota.limit_credits) : '—'"
+                :hint="quota ? `≈ ${formatCents(quota.limit_cents)}` : ''"
+              />
               <StatTile label="项目数" :value="stats?.projects ?? '—'" />
               <StatTile label="剧集数" :value="stats?.episodes ?? '—'" />
               <StatTile label="任务数" :value="stats?.jobs ?? '—'" />
@@ -687,24 +696,6 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.page {
-  padding: 24px;
-  display: flex;
-  flex-direction: column;
-  gap: var(--gap-lg);
-  max-width: 1500px;
-}
-.page-head {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 16px;
-  flex-wrap: wrap;
-}
-.page-head p {
-  margin-top: 4px;
-  max-width: 720px;
-}
 .overview-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr);
@@ -719,8 +710,8 @@ onMounted(async () => {
 .overview-side {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 14px;
+  gap: var(--space-3);
+  padding: var(--space-4);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--panel-2);
@@ -728,13 +719,13 @@ onMounted(async () => {
 .bucket-group {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
 }
 .bucket {
   display: grid;
   grid-template-columns: minmax(72px, 96px) 1fr auto;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
 }
 .bucket-label {
   color: var(--text-2);
@@ -752,13 +743,13 @@ onMounted(async () => {
   border-bottom: 1px solid var(--line);
 }
 .pad-x {
-  padding: 16px;
+  padding: var(--space-4);
 }
 .pager {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--space-3);
   flex-wrap: wrap;
 }
 .legend {
@@ -786,8 +777,8 @@ onMounted(async () => {
 }
 .select-sm {
   width: auto;
-  padding: 5px 26px 5px 8px;
-  font-size: 12px;
+  padding: var(--space-2) var(--space-6) 5px 8px;
+  font-size: var(--fs-12);
 }
 @media (max-width: 1120px) {
   .overview-grid {

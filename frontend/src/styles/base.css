@@ -1,6 +1,13 @@
 /**
  * 全局基础样式 + 跨页面复用的原子类。
- * 组件私有样式一律写在各自的 <style scoped> 里。
+ *
+ * 分层约定：
+ *   1. 重置与排版      —— 字号只走 --fs-*，行高走 --lh-*
+ *   2. 页面骨架        —— .page-head / .stage / .two-col 全站唯一实现
+ *   3. 组件原子        —— 卡片 / 按钮 / 表单 / 徽章 / 表格 / 空态
+ *   4. 响应式与降级    —— 容器查询优先（工作区宽度），媒体查询兜底
+ *
+ * 组件私有样式仍写在各自 <style scoped> 里，但不得再复制上述原子。
  */
 
 *,
@@ -20,13 +27,18 @@ body {
   background: var(--bg-0);
   color: var(--text-0);
   font-family: var(--font-ui);
-  font-size: 14px;
-  line-height: 1.55;
+  font-size: var(--fs-14);
+  line-height: var(--lh-base);
+  letter-spacing: 0.005em;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
 
-/* 极淡的渐变底纹，避免大面积纯色发闷 */
+/* ------------------------------------------------------------------ *
+ * 氛围层：暖色柔光 + 32px 机械网格 + 极淡噪点
+ * 只做背景，不参与布局；App 外壳 z-index 更高，永远压在上面。
+ * ------------------------------------------------------------------ */
+
 body::before {
   content: '';
   position: fixed;
@@ -34,15 +46,75 @@ body::before {
   pointer-events: none;
   z-index: 0;
   background:
-    radial-gradient(1100px 620px at 8% -12%, rgba(56, 189, 248, 0.07), transparent 62%),
-    radial-gradient(900px 560px at 98% 4%, rgba(167, 139, 250, 0.07), transparent 60%),
-    linear-gradient(180deg, #0b0d12 0%, #0e1117 60%, #0b0d12 100%);
+    radial-gradient(920px 540px at 4% -10%, rgba(224, 138, 60, 0.11), transparent 62%),
+    radial-gradient(820px 480px at 100% -2%, rgba(130, 168, 203, 0.07), transparent 58%),
+    linear-gradient(rgba(243, 237, 227, 0.010) 1px, transparent 1px) 0 0 / 40px 40px,
+    linear-gradient(90deg, rgba(243, 237, 227, 0.010) 1px, transparent 1px) 0 0 / 40px 40px,
+    linear-gradient(180deg, #0b0a09 0%, #0f0e0c 58%, #0b0a09 100%);
+  -webkit-mask-image: radial-gradient(120% 90% at 50% 0%, #000 35%, rgba(0, 0, 0, 0.55) 100%);
+  mask-image: radial-gradient(120% 90% at 50% 0%, #000 35%, rgba(0, 0, 0, 0.55) 100%);
 }
+
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.035;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+::selection {
+  background: var(--accent-soft);
+  color: var(--text-0);
+}
+
+/* ---- 滚动条 ---- */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(243, 237, 227, 0.16) transparent;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(243, 237, 227, 0.14);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: var(--radius-pill);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(243, 237, 227, 0.28);
+  background-clip: content-box;
+}
+
+/* ---- 焦点可见性：全站统一，键盘用户始终看得见 ---- */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}
+
+/* ------------------------------------------------------------------ *
+ * 排版
+ * ------------------------------------------------------------------ */
 
 h1,
 h2,
 h3,
-h4,
+h4 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 600;
+  line-height: var(--lh-tight);
+  letter-spacing: 0.01em;
+}
 p {
   margin: 0;
 }
@@ -60,66 +132,45 @@ textarea {
   color: inherit;
 }
 
-/* ---- 滚动条 ---- */
-* {
-  scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.16) transparent;
-}
-::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
-}
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.14);
-  border: 3px solid transparent;
-  background-clip: content-box;
-  border-radius: var(--radius-pill);
-}
-::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.26);
-  background-clip: content-box;
-}
-
-/* ---- 焦点可见性 ---- */
-:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-  border-radius: var(--radius-xs);
-}
-
-/* ------------------------------------------------------------------ *
- * 排版
- * ------------------------------------------------------------------ */
-
 .title-xl {
-  font-size: 26px;
-  font-weight: 700;
-  letter-spacing: 0.01em;
+  font-size: clamp(22px, 1.7vw, 26px);
+  font-weight: 650;
+  letter-spacing: 0.005em;
+  line-height: 1.2;
 }
 .title-lg {
-  font-size: 19px;
-  font-weight: 650;
-  letter-spacing: 0.01em;
+  font-size: var(--fs-19);
+  font-weight: 620;
+  letter-spacing: 0.008em;
 }
 .title-md {
-  font-size: 15px;
-  font-weight: 620;
-  letter-spacing: 0.012em;
+  font-size: var(--fs-16);
+  font-weight: 600;
+  letter-spacing: 0.01em;
 }
+
+/* 微型标签：全站唯一的「小标题」写法，别再手写 11px + 字距 */
 .section-title {
-  font-size: 12px;
-  font-weight: 640;
-  letter-spacing: 0.14em;
+  font-size: var(--fs-11);
+  font-weight: 600;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--text-2);
 }
+.micro {
+  font-size: var(--fs-11);
+  letter-spacing: 0.08em;
+  color: var(--text-3);
+}
+
 .mono {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.01em;
+}
+.num {
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
 }
 .muted {
   color: var(--text-1);
@@ -131,10 +182,10 @@ textarea {
   color: var(--text-3);
 }
 .tiny {
-  font-size: 12px;
+  font-size: var(--fs-12);
 }
 .small {
-  font-size: 13px;
+  font-size: var(--fs-13);
 }
 .grad-text {
   background: var(--accent-grad);
@@ -193,16 +244,102 @@ textarea {
   flex-direction: column;
   gap: var(--gap);
 }
-.grid-cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(268px, 1fr));
-  gap: var(--gap);
-}
 .divider {
   height: 1px;
   background: var(--line);
   border: 0;
   margin: 0;
+}
+.grid-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(268px, 1fr));
+  gap: var(--gap);
+}
+
+/* ------------------------------------------------------------------ *
+ * 页面骨架（全站唯一实现，禁止在各视图里重复定义）
+ * ------------------------------------------------------------------ */
+
+/* 外层页面容器：统一内边距、纵向节奏与阅读宽度 */
+.page {
+  width: 100%;
+  max-width: 1320px;
+  margin-inline: auto;
+  padding: var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-lg);
+}
+
+/* 外层页面：标题 + 说明 + 右侧操作，底部 20px 留白形成节奏 */
+.page-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+  padding-bottom: var(--space-5);
+  border-bottom: 1px solid var(--line);
+}
+.page-head h1 {
+  margin: 0;
+}
+.page-head p {
+  margin-top: 6px;
+  max-width: 720px;
+  line-height: 1.7;
+}
+
+/* 剧集页工作区：纵向节奏统一为 16px */
+.stage {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  min-width: 0;
+}
+
+/* 阶段页头：序号 + 标题 + 说明 + 右侧操作 */
+.stage-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--line);
+}
+.stage-head .stage-index {
+  font-family: var(--font-display);
+  font-size: var(--fs-11);
+  letter-spacing: 0.18em;
+  color: var(--accent);
+  text-transform: uppercase;
+}
+.stage-head h2 {
+  font-size: var(--fs-24);
+  margin-top: 2px;
+}
+.stage-head p {
+  margin-top: 4px;
+  max-width: 640px;
+  font-size: var(--fs-13);
+  color: var(--text-2);
+  line-height: 1.7;
+}
+
+/* 内容两栏：默认 1.35 : 1；.two-col--even 用于左右等权重的页面。
+   宽度判断交给容器查询（见文件末尾），不受整页视口宽度误导。 */
+.two-col {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+  gap: var(--gap);
+  align-items: start;
+}
+.two-col--even {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+.two-col > * {
+  min-width: 0;
 }
 
 /* ------------------------------------------------------------------ *
@@ -215,11 +352,10 @@ textarea {
   border-radius: var(--radius);
   transition:
     border-color var(--dur) var(--ease),
-    background var(--dur) var(--ease),
-    transform var(--dur) var(--ease);
+    background var(--dur) var(--ease);
 }
 .card-pad {
-  padding: 16px;
+  padding: var(--space-4);
 }
 .card-hover:hover {
   border-color: var(--line-strong);
@@ -230,14 +366,20 @@ textarea {
   align-items: center;
   justify-content: space-between;
   gap: var(--gap-sm);
-  padding: 14px 16px;
+  min-height: 48px;
+  padding: 10px var(--space-4);
   border-bottom: 1px solid var(--line);
 }
+.card-head h2,
+.card-head h3 {
+  font-size: var(--fs-14);
+  font-weight: 620;
+}
 .card-body {
-  padding: 16px;
+  padding: var(--space-4);
 }
 .card-foot {
-  padding: 12px 16px;
+  padding: 10px var(--space-4);
   border-top: 1px solid var(--line);
 }
 
@@ -250,14 +392,15 @@ textarea {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  height: 34px;
+  height: 32px;
   padding: 0 14px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--line-strong);
   background: var(--panel-2);
   color: var(--text-0);
-  font-size: 13px;
+  font-size: var(--fs-13);
   font-weight: 550;
+  line-height: 1;
   cursor: pointer;
   white-space: nowrap;
   transition:
@@ -268,20 +411,28 @@ textarea {
 }
 .btn:hover:not(:disabled) {
   background: var(--panel-3);
-  border-color: rgba(255, 255, 255, 0.26);
+  border-color: rgba(243, 237, 227, 0.26);
+}
+.btn:active:not(:disabled) {
+  transform: translateY(0.5px);
 }
 .btn:disabled {
-  opacity: 0.45;
+  opacity: 0.42;
   cursor: not-allowed;
+}
+.btn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-color: var(--line-accent);
 }
 .btn-primary {
   background: var(--accent-grad);
   border-color: transparent;
-  color: #08111a;
+  color: var(--accent-ink);
   font-weight: 650;
 }
 .btn-primary:hover:not(:disabled) {
-  filter: brightness(1.08);
+  filter: brightness(1.06);
   background: var(--accent-grad);
   border-color: transparent;
 }
@@ -293,36 +444,45 @@ textarea {
 .btn-ghost:hover:not(:disabled) {
   background: var(--neutral-soft);
   color: var(--text-0);
+  border-color: var(--line);
 }
 .btn-danger {
   background: var(--danger-soft);
-  border-color: rgba(248, 113, 113, 0.4);
-  color: #fecaca;
+  border-color: rgba(224, 122, 106, 0.4);
+  color: #f3bdb2;
 }
 .btn-danger:hover:not(:disabled) {
-  background: rgba(248, 113, 113, 0.22);
+  background: rgba(224, 122, 106, 0.22);
 }
 .btn-ok {
   background: var(--ok-soft);
-  border-color: rgba(52, 211, 153, 0.4);
-  color: #bbf7e0;
+  border-color: rgba(111, 191, 147, 0.4);
+  color: #b8e7cd;
 }
 .btn-ok:hover:not(:disabled) {
-  background: rgba(52, 211, 153, 0.22);
+  background: rgba(111, 191, 147, 0.22);
 }
 .btn-sm {
-  height: 27px;
+  height: 28px;
   padding: 0 10px;
-  font-size: 12px;
+  font-size: var(--fs-12);
   border-radius: var(--radius-xs);
 }
 .btn-lg {
   height: 40px;
   padding: 0 20px;
-  font-size: 14px;
+  font-size: var(--fs-14);
 }
 .btn-block {
   width: 100%;
+}
+
+/* 触屏：可点区域抬到 44px，避免密集工具条上的误触 */
+@media (pointer: coarse) {
+  .btn,
+  .btn-sm {
+    min-height: 44px;
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -333,9 +493,10 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  min-width: 0;
 }
 .label {
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 560;
   color: var(--text-1);
   letter-spacing: 0.02em;
@@ -345,8 +506,9 @@ textarea {
   margin-left: 3px;
 }
 .hint {
-  font-size: 11.5px;
+  font-size: var(--fs-11);
   color: var(--text-2);
+  line-height: 1.6;
 }
 .input,
 .textarea,
@@ -355,12 +517,13 @@ textarea {
   background: var(--bg-1);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  padding: 8px 10px;
-  font-size: 13px;
+  padding: 7px 10px;
+  font-size: var(--fs-13);
   color: var(--text-0);
   transition:
     border-color var(--dur) var(--ease),
-    background var(--dur) var(--ease);
+    background var(--dur) var(--ease),
+    box-shadow var(--dur) var(--ease);
 }
 .input:hover,
 .textarea:hover,
@@ -372,8 +535,8 @@ textarea {
 .select:focus {
   outline: none;
   border-color: var(--line-accent);
-  background: #0f1218;
-  box-shadow: 0 0 0 3px var(--accent-soft);
+  background: #100f0d;
+  box-shadow: var(--focus-ring);
 }
 .input::placeholder,
 .textarea::placeholder {
@@ -382,16 +545,16 @@ textarea {
 .input.invalid,
 .textarea.invalid,
 .select.invalid {
-  border-color: rgba(248, 113, 113, 0.6);
+  border-color: rgba(224, 122, 106, 0.6);
 }
 .textarea {
   resize: vertical;
   min-height: 96px;
-  line-height: 1.6;
+  line-height: 1.65;
 }
 .textarea.mono-input {
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: var(--fs-12);
 }
 .select {
   appearance: none;
@@ -411,18 +574,20 @@ textarea {
   gap: 7px;
   cursor: pointer;
   user-select: none;
-  font-size: 13px;
+  font-size: var(--fs-13);
 }
 .checkbox input {
   appearance: none;
   width: 15px;
   height: 15px;
   border: 1px solid var(--line-strong);
-  border-radius: 4px;
+  border-radius: 3px;
   background: var(--bg-1);
   cursor: pointer;
   position: relative;
-  transition: all var(--dur) var(--ease);
+  transition:
+    background var(--dur) var(--ease),
+    border-color var(--dur) var(--ease);
 }
 .checkbox input:checked {
   background: var(--accent-grad);
@@ -435,13 +600,17 @@ textarea {
   top: 1px;
   width: 5px;
   height: 9px;
-  border: 2px solid #08111a;
+  border: 2px solid var(--accent-ink);
   border-top: 0;
   border-left: 0;
   transform: rotate(42deg);
 }
+.checkbox input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .field-error {
-  font-size: 11.5px;
+  font-size: var(--fs-11);
   color: var(--danger);
 }
 
@@ -455,8 +624,8 @@ textarea {
   gap: 5px;
   height: 21px;
   padding: 0 8px;
-  border-radius: var(--radius-pill);
-  font-size: 11.5px;
+  border-radius: var(--radius-xs);
+  font-size: var(--fs-11);
   font-weight: 600;
   letter-spacing: 0.02em;
   background: var(--neutral-soft);
@@ -467,12 +636,12 @@ textarea {
 .badge-ok {
   background: var(--ok-soft);
   color: var(--ok);
-  border-color: rgba(52, 211, 153, 0.3);
+  border-color: rgba(111, 191, 147, 0.3);
 }
 .badge-warn {
   background: var(--warn-soft);
   color: var(--warn);
-  border-color: rgba(251, 191, 36, 0.3);
+  border-color: rgba(232, 203, 109, 0.3);
 }
 /* 中性/未启用态：比默认 badge 更淡，用于「未启用」这类非警告信息 */
 .badge-muted {
@@ -483,17 +652,17 @@ textarea {
 .badge-danger {
   background: var(--danger-soft);
   color: var(--danger);
-  border-color: rgba(248, 113, 113, 0.3);
+  border-color: rgba(224, 122, 106, 0.3);
 }
 .badge-info {
   background: var(--info-soft);
   color: var(--info);
-  border-color: rgba(56, 189, 248, 0.3);
+  border-color: rgba(130, 168, 203, 0.3);
 }
 .badge-accent {
-  background: var(--accent-2-soft);
-  color: var(--accent-2);
-  border-color: rgba(167, 139, 250, 0.3);
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--line-accent);
 }
 .badge-dot::before {
   content: '';
@@ -501,21 +670,25 @@ textarea {
   height: 5px;
   border-radius: 50%;
   background: currentColor;
+  flex: 0 0 auto;
 }
 .chip {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   padding: 2px 9px;
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-xs);
   border: 1px solid var(--line);
   background: var(--bg-1);
-  font-size: 11.5px;
+  font-size: var(--fs-11);
   color: var(--text-1);
 }
 .chip-selectable {
   cursor: pointer;
-  transition: all var(--dur) var(--ease);
+  transition:
+    border-color var(--dur) var(--ease),
+    color var(--dur) var(--ease),
+    background var(--dur) var(--ease);
 }
 .chip-selectable:hover {
   border-color: var(--line-strong);
@@ -532,9 +705,9 @@ textarea {
  * ------------------------------------------------------------------ */
 
 .progress {
-  height: 5px;
+  height: 4px;
   border-radius: var(--radius-pill);
-  background: rgba(255, 255, 255, 0.07);
+  background: rgba(243, 237, 227, 0.07);
   overflow: hidden;
 }
 .progress-bar {
@@ -563,7 +736,7 @@ textarea {
 .skeleton {
   position: relative;
   overflow: hidden;
-  background: rgba(255, 255, 255, 0.05);
+  background: rgba(243, 237, 227, 0.05);
   border-radius: var(--radius-sm);
 }
 .skeleton::after {
@@ -571,7 +744,7 @@ textarea {
   position: absolute;
   inset: 0;
   transform: translateX(-100%);
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.07), transparent);
+  background: linear-gradient(90deg, transparent, rgba(243, 237, 227, 0.07), transparent);
   animation: skeleton-sweep 1.4s infinite;
 }
 @keyframes skeleton-sweep {
@@ -590,15 +763,15 @@ textarea {
   align-items: center;
   justify-content: center;
   gap: 10px;
-  padding: 46px 20px;
+  padding: 40px 20px;
   text-align: center;
   color: var(--text-2);
   border: 1px dashed var(--line);
   border-radius: var(--radius);
-  background: rgba(255, 255, 255, 0.012);
+  background: rgba(243, 237, 227, 0.012);
 }
 .empty-title {
-  font-size: 14px;
+  font-size: var(--fs-14);
   font-weight: 600;
   color: var(--text-1);
 }
@@ -611,7 +784,7 @@ textarea {
   display: grid;
   grid-template-columns: minmax(88px, auto) 1fr;
   gap: 7px 14px;
-  font-size: 12.5px;
+  font-size: var(--fs-12);
 }
 .kv > dt {
   color: var(--text-2);
@@ -629,18 +802,18 @@ textarea {
 .table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 13px;
+  font-size: var(--fs-13);
 }
 .table th {
   text-align: left;
-  font-size: 11.5px;
+  font-size: var(--fs-11);
   font-weight: 600;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text-2);
-  padding: 9px 12px;
-  border-bottom: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.015);
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line-strong);
+  background: rgba(243, 237, 227, 0.015);
   position: sticky;
   top: 0;
   backdrop-filter: blur(6px);
@@ -655,7 +828,7 @@ textarea {
   transition: background var(--dur) var(--ease);
 }
 .table tbody tr:hover {
-  background: rgba(255, 255, 255, 0.028);
+  background: rgba(243, 237, 227, 0.028);
 }
 .table tbody tr:last-child td {
   border-bottom: 0;
@@ -673,7 +846,7 @@ textarea {
   align-items: center;
   justify-content: center;
   padding: 24px;
-  background: rgba(4, 6, 10, 0.66);
+  background: rgba(6, 5, 4, 0.68);
   backdrop-filter: blur(3px);
   animation: fade-in var(--dur-slow) var(--ease);
 }
@@ -686,7 +859,7 @@ textarea {
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-2);
-  animation: modal-in var(--dur-slow) var(--ease);
+  animation: modal-in var(--dur-slow) var(--ease-out);
 }
 @keyframes fade-in {
   from {
@@ -716,6 +889,57 @@ textarea {
   border: 0;
 }
 
+/* ------------------------------------------------------------------ *
+ * 响应式
+ *
+ * 工作区是「壳里的壳」：整页 1440px 时，中间的编辑区可能只有 600px。
+ * 所以两栏布局按**容器宽度**收缩（@container workspace），
+ * 而不是按视口收缩；不支持容器查询的浏览器退回媒体查询。
+ * ------------------------------------------------------------------ */
+
+/* 不指定容器名：就近匹配 .shell-main / .wb-center 上的容器上下文 */
+@container (max-width: 880px) {
+  .two-col,
+  .two-col--even {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@supports not (container-type: inline-size) {
+  @media (max-width: 1340px) {
+    .two-col,
+    .two-col--even {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+}
+
+@media (max-width: 760px) {
+  .page-head {
+    align-items: flex-start;
+    gap: var(--space-3);
+    padding-bottom: var(--space-4);
+  }
+  .page-head p {
+    max-width: none;
+  }
+  .grid-cards {
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  }
+  .card-body {
+    padding: var(--space-3);
+  }
+  .card-head {
+    padding: 10px var(--space-3);
+    flex-wrap: wrap;
+    min-height: 0;
+  }
+  .card-head h2,
+  .card-head h3 {
+    flex: 0 0 auto;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -723,5 +947,6 @@ textarea {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

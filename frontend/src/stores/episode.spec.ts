@@ -73,7 +73,11 @@ vi.mock('@/api/client', () => ({
 vi.mock('@/api/episodes', () => ({ episodesApi: { get: vi.fn(), overview: vi.fn() } }))
 vi.mock('@/api/workflow', () => ({ workflowApi: {} }))
 vi.mock('@/api/shots', () => ({ fetchShots: vi.fn(async () => []) }))
-vi.mock('@/api/jobs', () => ({ fetchJobs: vi.fn(async () => []) }))
+vi.mock('@/api/jobs', () => ({
+  fetchJobs: vi.fn(async () => []),
+  isTerminalJobStatus: (status?: string | null) =>
+    status === 'SUCCEEDED' || status === 'FAILED' || status === 'CANCELLED' || status === 'EXPIRED',
+}))
 vi.mock('@/api/projects', () => ({ asList: (v: unknown) => (Array.isArray(v) ? v : []) }))
 vi.mock('@/api/events', () => ({ episodeEventsUrl: () => '/api/v1/events' }))
 vi.mock('@/stores/jobs', () => ({
@@ -237,5 +241,110 @@ describe('trackJob', () => {
     store.trackJob(null)
     store.trackJob(undefined)
     expect(store.watchedJobIds).toEqual([])
+  })
+})
+
+describe('selectedShotNos（分镜勾选共享状态）', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  it('去重并升序，保证底部批量操作与页面勾选一致', () => {
+    const store = useEpisodeStore()
+    store.setSelectedShots([3, 1, 3, 2])
+    expect(store.selectedShotNos).toEqual([1, 2, 3])
+  })
+
+  it('可以清空（未勾选时生成按钮应提示而不是默认全选）', () => {
+    const store = useEpisodeStore()
+    store.setSelectedShots([1, 2])
+    store.setSelectedShots([])
+    expect(store.selectedShotNos).toEqual([])
+  })
+})
+
+/**
+ * 实时刷新范围：SSE 事件到了，页面上的东西必须自己更新。
+ *
+ * 历史 bug：`refreshLive()` 只刷 overview/workflow/episode，不含分镜表，
+ * 于是「任务显示生成成功、候选图仍是暂无素材」，用户必须手动刷新。
+ */
+describe('SSE 事件触发的刷新范围', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  async function wait(ms: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, ms))
+  }
+
+  it('media.created 会重载分镜表（新图不再需要手动刷新）', async () => {
+    const shotsApi = await import('@/api/shots')
+    const fetchShots = vi.mocked(shotsApi.fetchShots)
+    fetchShots.mockClear()
+
+    const store = useEpisodeStore()
+    store.episodeId = 'epi_1'
+    emit('media.created', { media_id: 'med_1', kind: 'image', role: 'shot_image' })
+
+    // 刷新有 700ms 节流，等它落地
+    await wait(900)
+    expect(fetchShots).toHaveBeenCalledWith('epi_1')
+  })
+
+  it('分镜表还没加载（shotCount=0）时也刷新，不能因为空就吞掉事件', async () => {
+    const shotsApi = await import('@/api/shots')
+    const fetchShots = vi.mocked(shotsApi.fetchShots)
+    fetchShots.mockClear()
+
+    const store = useEpisodeStore()
+    store.episodeId = 'epi_1'
+    store.shots = []
+    emit('media.created', { media_id: 'med_2', kind: 'image' })
+
+    await wait(900)
+    expect(fetchShots).toHaveBeenCalled()
+  })
+
+  it('刷新过程中收到的事件不会被丢掉（合并成末尾再刷一次）', async () => {
+    const shotsApi = await import('@/api/shots')
+    const fetchShots = vi.mocked(shotsApi.fetchShots)
+    // 让第一次刷新慢一点，制造「刷新中又来了事件」的窗口
+    const pending: { resolve: (() => void) | null } = { resolve: null }
+    fetchShots.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          pending.resolve = () => resolve([])
+        }) as never,
+    )
+    fetchShots.mockClear()
+
+    const store = useEpisodeStore()
+    store.episodeId = 'epi_1'
+    emit('job.succeeded', { job_id: 'job_a', status: 'SUCCEEDED' })
+    await wait(800) // 第一次刷新已开始，卡在 fetchShots 上
+    emit('job.succeeded', { job_id: 'job_b', status: 'SUCCEEDED' })
+
+    pending.resolve?.()
+    await wait(1200)
+    // 第二次事件应该排队补刷，而不是被 `if (refreshing) return` 吞掉
+    expect(fetchShots.mock.calls.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('页面刷新后进来的任务会被纳入监听（否则进度停在初始快照）', () => {
+    const store = useEpisodeStore()
+    store.episodeId = 'epi_1'
+    expect(store.watchedJobIds).not.toContain('job_late')
+
+    emit('job.progress', { job_id: 'job_late', status: 'RUNNING', progress: 40, episode_id: 'epi_1' })
+
+    expect(store.watchedJobIds).toContain('job_late')
+  })
+
+  it('其它剧集的任务不会被误纳入', () => {
+    const store = useEpisodeStore()
+    store.episodeId = 'epi_1'
+    emit('job.progress', { job_id: 'job_other', status: 'RUNNING', episode_id: 'epi_2' })
+    expect(store.watchedJobIds).not.toContain('job_other')
   })
 })

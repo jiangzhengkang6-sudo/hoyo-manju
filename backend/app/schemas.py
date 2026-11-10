@@ -449,6 +449,14 @@ class ProjectUpdate(BaseModel):
     aspect_ratio: str | None = None
     default_language: str | None = None
     default_style_id: str | None = None
+    #: 统一语速：仅影响之后新建/同步出来的角色；已有角色要显式「应用到全部角色」
+    default_voice_speed: float | None = Field(default=None, ge=0.5, le=2.0)
+
+
+class VoiceSpeedIn(BaseModel):
+    """把统一语速应用到项目下全部角色（本地生效，不调用模型）。"""
+
+    speed: float = Field(ge=0.5, le=2.0)
 
 
 class ProjectOut(ORMModel):
@@ -526,6 +534,12 @@ class ShotRegenerate(BaseModel):
     instruction: str = ""
 
 
+class ShotSuggestIn(BaseModel):
+    """单镜「按大纲生成」的补充要求（可选）。"""
+
+    instruction: str = Field(default="", max_length=300)
+
+
 class BeatRegenerate(BaseModel):
     """FR-014：按剧情节拍局部重生成。
 
@@ -552,6 +566,8 @@ class CharacterCreate(BaseModel):
     speech_style: str = ""
     forbidden_changes: list[str] = Field(default_factory=list)
     is_main: bool = True
+    #: 归属剧集；为空表示项目级公共角色（所有剧集可见）
+    episode_id: str | None = None
 
 
 class CharacterUpdate(BaseModel):
@@ -651,6 +667,12 @@ class VideoConfirmIn(BaseModel):
     media_id: str
 
 
+class VideoFetchIn(BaseModel):
+    """按供应商任务号补拉已生成的片段（不产生新费用）。"""
+
+    task_id: str = Field(min_length=6, max_length=96)
+
+
 class VideoSkipIn(BaseModel):
     reason: str = ""
     fallback: Literal["static_image", "blank"] = "static_image"
@@ -679,6 +701,12 @@ class TTSGenerate(BaseModel):
     character_id: str | None = None
 
 
+class TrackSpeedIn(BaseModel):
+    """调整**已生成**音频的语速（本地变速，不调用模型）。"""
+
+    speed: float = Field(ge=0.5, le=2.0)
+
+
 class ManualAudioIn(BaseModel):
     """§12-4：TTS 失败时用上传音频顶替某句台词。"""
 
@@ -689,10 +717,15 @@ class ManualAudioIn(BaseModel):
 
 
 class SkipDialogueIn(BaseModel):
-    """§12-4：跳过配音后继续预览。"""
+    """§12-4：跳过配音后继续预览。
+
+    `line_index` 给定时只跳过该镜的第几句台词（逐行「跳过」按钮），
+    否则跳过这些镜头的全部台词（整段跳过）。
+    """
 
     shot_nos: list[int] = Field(min_length=1)
     reason: str = ""
+    line_index: int | None = Field(default=None, ge=0)
 
 
 class AppealCreateIn(BaseModel):
@@ -709,6 +742,27 @@ class AppealResolveIn(BaseModel):
 
     status: Literal["PENDING", "APPROVED", "REJECTED"]
     resolution_note: str = Field(default="", max_length=2000)
+
+
+class BGMGenerateIn(BaseModel):
+    """氛围音 / BGM 生成：描述写场景，按生成时长（秒）计费。
+
+    - 不传镜头：整集垫乐（kind=bgm），从 0 开始铺；
+    - 传 `shot_no`：只覆盖该镜头（kind=ambience）；
+    - 传 `shot_from` + `shot_to`：覆盖这段镜头（一段垫乐多个镜头共用），
+      起点取首镜、长度铺到末镜结束。
+
+    指定镜头时 `seconds` 会被忽略（按镜头实际长度裁剪）。
+    """
+
+    prompt: str = Field(min_length=2, max_length=1000)
+    seconds: int = Field(default=30, ge=3, le=120)
+    shot_no: int | None = Field(default=None, ge=1)
+    shot_from: int | None = Field(default=None, ge=1)
+    shot_to: int | None = Field(default=None, ge=1)
+    volume_db: float = Field(default=-14.0, ge=-60, le=0)
+    fade_in_ms: int = Field(default=800, ge=0, le=10000)
+    fade_out_ms: int = Field(default=1500, ge=0, le=10000)
 
 
 class TrackCreate(BaseModel):
@@ -728,6 +782,10 @@ class TrackCreate(BaseModel):
 
 class WorkflowStart(BaseModel):
     auto_run: bool = True
+    #: 已有剧本时是否直接复用、不再调用模型生成。
+    #: `None`（默认）表示「有剧本就复用」——用户在「故事与剧本」页已经生成过
+    #: 剧本（可能还手改过）时，启动工作流不该再花一次钱把它重新生成一遍。
+    reuse_script: bool | None = None
 
 
 class WorkflowResume(BaseModel):
@@ -790,6 +848,9 @@ class JobListOut(BaseModel):
 
 class RenderPreviewIn(BaseModel):
     watermark: bool = True
+    #: 部分预览：只合成「已就绪」的镜头（有画面/视频），先看单镜成片效果；
+    #: 未就绪镜头从时间线剔除，字幕/BGM 按新起点重映射。正式导出仍必须完整。
+    partial: bool = False
 
 
 class RenderExportIn(BaseModel):

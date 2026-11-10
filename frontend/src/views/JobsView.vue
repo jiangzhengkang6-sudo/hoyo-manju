@@ -8,7 +8,7 @@ import { useToastStore } from '@/stores/toast'
 import { workspaceEventsUrl } from '@/api/events'
 import { JOB_STATUS_LABEL, JOB_TYPE_LABEL, isTerminalJobStatus, jobTypeLabel } from '@/api/jobs'
 import { formatCents } from '@/api/cost'
-import { formatDateTime, formatDuration } from '@/utils/format'
+import { providerStatusLabel, formatDateTime, formatDuration } from '@/utils/format'
 import { useSse } from '@/composables/useSse'
 import { usePolling } from '@/composables/usePolling'
 import JobBadge from '@/components/JobBadge.vue'
@@ -395,7 +395,7 @@ function goEpisode(job: Job): void {
                 <td class="mono tiny">{{ call.model || '—' }}</td>
                 <td>
                   <span class="badge" :class="call.status === 'SUCCEEDED' ? 'badge-ok' : call.status === 'FAILED' ? 'badge-danger' : 'badge-info'">
-                    {{ call.status || '—' }}
+                    {{ providerStatusLabel(call.status) }}
                   </span>
                 </td>
                 <td class="mono tiny">
@@ -424,24 +424,6 @@ function goEpisode(job: Job): void {
 </template>
 
 <style scoped>
-.page {
-  padding: 24px;
-  display: flex;
-  flex-direction: column;
-  gap: var(--gap-lg);
-  max-width: 1500px;
-}
-.page-head {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 16px;
-  flex-wrap: wrap;
-}
-.page-head p {
-  margin-top: 4px;
-  max-width: 660px;
-}
 .filter-bar {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
@@ -450,7 +432,7 @@ function goEpisode(job: Job): void {
 .job-cell {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: var(--space-1);
   min-width: 0;
 }
 .link {
@@ -468,25 +450,25 @@ function goEpisode(job: Job): void {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--space-3);
 }
 .detail-error {
-  border: 1px solid rgba(248, 113, 113, 0.35);
+  border: 1px solid rgba(224, 122, 106, 0.35);
   background: var(--danger-soft);
   border-radius: var(--radius-sm);
-  padding: 10px 12px;
+  padding: var(--space-3) var(--space-3);
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-2);
 }
 .detail-block {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
 }
 .detail-block pre {
   margin: 0;
-  padding: 10px;
+  padding: var(--space-3);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--bg-1);

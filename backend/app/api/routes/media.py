@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, File, Form, Query, UploadFile
+from fastapi import APIRouter, File, Form, Query, Request, UploadFile
 from fastapi.responses import Response
 from sqlalchemy import select
 
@@ -37,6 +37,54 @@ def _disposition(filename: str, *, inline: bool = True) -> str:
     ascii_name = filename.encode("ascii", "ignore").decode("ascii").replace('"', "") or "download"
     kind = "inline" if inline else "attachment"
     return f"{kind}; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename)}"
+
+
+def _range_response(
+    request: Request,
+    content: bytes,
+    media_type: str,
+    *,
+    headers: dict[str, str] | None = None,
+) -> Response:
+    """带 HTTP Range 的媒体响应。
+
+    浏览器 `<video>` 依赖 206：没有 `Accept-Ranges` 时，Chrome 拖动进度条会失败，
+    Safari 更是直接黑屏不播。整段返回（200）只在客户端不要 Range 时才走。
+    """
+    base = {"Accept-Ranges": "bytes", **(headers or {})}
+    total = len(content)
+    raw = request.headers.get("range") or ""
+    if not raw.lower().startswith("bytes="):
+        return Response(content, media_type=media_type, headers={**base, "Content-Length": str(total)})
+
+    spec = raw[6:].split(",")[0].strip()
+    start_s, _, end_s = spec.partition("-")
+    try:
+        if start_s == "":                       # bytes=-N：最后 N 字节
+            length = int(end_s)
+            start, end = max(0, total - length), total - 1
+        else:
+            start = int(start_s)
+            end = int(end_s) if end_s else total - 1
+    except ValueError:
+        start, end = -1, -1
+    if start < 0 or start >= total or end < start:
+        return Response(
+            status_code=416,
+            headers={**base, "Content-Range": f"bytes */{total}"},
+        )
+    end = min(end, total - 1)
+    chunk = content[start : end + 1]
+    return Response(
+        chunk,
+        status_code=206,
+        media_type=media_type,
+        headers={
+            **base,
+            "Content-Range": f"bytes {start}-{end}/{total}",
+            "Content-Length": str(len(chunk)),
+        },
+    )
 
 
 @router.post("/media/upload", status_code=201)
@@ -120,7 +168,7 @@ def media_signed_url(media_id: str, session: SessionDep, ttl_seconds: int | None
 
 
 @router.get("/media/{media_id}/content")
-def media_content(media_id: str, session: SessionDep) -> Response:
+def media_content(media_id: str, request: Request, session: SessionDep) -> Response:
     asset = media_service.get_media(session, media_id)
     try:
         content = media_service.read_media(asset)
@@ -137,9 +185,10 @@ def media_content(media_id: str, session: SessionDep) -> Response:
         detail={"kind": asset.kind, "via": "content", "bytes": len(content)},
     )
     session.flush()
-    return Response(
-        content=content,
-        media_type=asset.mime_type,
+    return _range_response(
+        request,
+        content,
+        asset.mime_type,
         headers={
             "Content-Disposition": _disposition(asset.filename),
             "X-AIGC-Label": "1",
@@ -184,11 +233,13 @@ def episode_media(
 ) -> dict:
     episode = get_episode(session, episode_id=episode_id)
     items = media_service.list_media(
-        session, episode_id=episode.id, kind=kind, role=role, limit=limit
+        session, episode_id=episode.id, kind=kind, role=role, limit=limit,
+        include_rejected=False,
     )
     project = session.get(Project, episode.project_id)
     character_assets = media_service.list_media(
-        session, project_id=project.id if project else None, kind="image", limit=limit
+        session, project_id=project.id if project else None, kind="image", limit=limit,
+        include_rejected=False,
     )
     combined = {a.id: a for a in items}
     for asset in character_assets:
@@ -201,7 +252,7 @@ def episode_media(
 
 
 @router.get("/storage/signed/{token}")
-def storage_signed(token: str) -> Response:
+def storage_signed(token: str, request: Request) -> Response:
     """本地存储的签名 URL 入口。"""
     storage = get_storage()
     key = storage.verify_signed(token)
@@ -214,4 +265,6 @@ def storage_signed(token: str) -> Response:
     import mimetypes
 
     mime = mimetypes.guess_type(key)[0] or "application/octet-stream"
-    return Response(content=content, media_type=mime, headers={"Cache-Control": "private, max-age=600"})
+    return _range_response(
+        request, content, mime, headers={"Cache-Control": "private, max-age=600"}
+    )

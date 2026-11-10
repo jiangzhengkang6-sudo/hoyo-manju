@@ -15,6 +15,13 @@ export const projectsApi = {
   patch: (projectId: string, body: ProjectPatch) =>
     http.patch<Project>(`/projects/${projectId}`, body),
 
+  /** 把统一语速应用到项目下全部角色（只改设定，不重新合成）。 */
+  voiceSpeed: (projectId: string, speed: number) =>
+    http.post<{ default_voice_speed: number; count: number; retimed?: number }>(
+      `/projects/${projectId}/voice-speed`,
+      { speed },
+    ),
+
   archive: (projectId: string) => http.post<Project>(`/projects/${projectId}/archive`),
 
   restore: (projectId: string) => http.post<Project>(`/projects/${projectId}/restore`),

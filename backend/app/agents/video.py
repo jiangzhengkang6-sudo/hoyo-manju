@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from sqlalchemy.orm import Session
 
@@ -54,6 +54,19 @@ def _local_path(session: Session, asset: MediaAsset) -> str:
     return str(path) if path and Path(path).exists() else ""
 
 
+def _frame_refs(session: Session, asset: MediaAsset) -> tuple[str, str]:
+    """首帧的两种引用方式：公网 URL（远端存储）与本地路径（本地存储）。
+
+    本地存储的 `media_url()` 是**相对签名路径**（`/api/v1/storage/signed/...`），
+    外部网关根本访问不到；直接塞给供应商等于没传首帧。这里只把真正的
+    http(s) 地址当 URL，其余交给 `image_path` 由供应商上传换公网地址。
+    """
+    url = media_service.media_url(asset)
+    if not url.startswith(("http://", "https://")):
+        url = ""
+    return url, _local_path(session, asset)
+
+
 def resolve_shot_params(shot: Shot, params: dict[str, Any] | None = None) -> dict[str, Any]:
     data = shot.shot_json or {}
     vp = dict(data.get("video_params") or {})
@@ -69,6 +82,32 @@ def resolve_shot_params(shot: Shot, params: dict[str, Any] | None = None) -> dic
         settings.shot_duration_ms_min, min(int(merged["duration_ms"]), settings.shot_duration_ms_max)
     )
     return merged
+
+
+def frame_media_id(session: Session, shot: Shot) -> str | None:
+    """图生视频的首帧：已确认画面 → 已选中候选 → 任意未驳回候选图。
+
+    口径统一在这里，避免估算、能力校验、真正生成三处各判一次。
+    「有画面」的判定要宽松：用户在分镜页看到候选图就算有画面，
+    不该因为没点「选中」就把整次估价拦下来；真正生成时按同样顺序取帧。
+    """
+    if shot.confirmed_media_id:
+        return shot.confirmed_media_id
+    if shot.selected_media_id:
+        return shot.selected_media_id
+    from sqlalchemy import select
+
+    candidate = session.scalar(
+        select(MediaAsset)
+        .where(
+            MediaAsset.owner_type == "shot",
+            MediaAsset.owner_id == shot.id,
+            MediaAsset.role == "shot_image",
+            MediaAsset.status != "REJECTED",
+        )
+        .order_by(MediaAsset.created_at)
+    )
+    return candidate.id if candidate else None
 
 
 def clamp_to_provider(params: dict[str, Any], capabilities: Any) -> dict[str, Any]:
@@ -141,6 +180,7 @@ def generate_for_shots(
     shots: list[Shot],
     params: dict[str, Any] | None = None,
     progress_cb=None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     project = session.get(Project, episode.project_id)
     provider = resolve(ProviderKind.VIDEO, session)
@@ -151,21 +191,30 @@ def generate_for_shots(
     failures: list[dict[str, Any]] = []
     total = max(1, len(shots))
     done = 0
+    cost_cents = 0
+    cancelled = False
 
     for shot in shots:
-        if not shot.confirmed_media_id:
+        # 视频单条要跑 1~3 分钟，取消只能在「下一条」生效；
+        # 已经提交的那条会照常出片、照常计费。
+        if should_cancel and should_cancel():
+            cancelled = True
+            break
+        # 出片严格：首帧必须是**已确认**的画面（估价可以宽松，花钱不行）
+        frame_id = shot.confirmed_media_id
+        if not frame_id:
             failures.append(
                 {
                     "shot_no": shot.shot_no,
                     "code": "STATE_CONFLICT",
-                    "message": "该分镜尚未确认画面，不能进入视频生成",
+                    "message": "该分镜尚未确认画面，不能进入视频生成（先在分镜页点「确认画面」）",
                 }
             )
             done += 1
             continue
-        image = session.get(MediaAsset, shot.confirmed_media_id)
+        image = session.get(MediaAsset, frame_id)
         if image is None:
-            failures.append({"shot_no": shot.shot_no, "code": "NOT_FOUND", "message": "确认图已丢失"})
+            failures.append({"shot_no": shot.shot_no, "code": "NOT_FOUND", "message": "首帧图已丢失"})
             done += 1
             continue
         merged = clamp_to_provider(resolve_shot_params(shot, params), caps)
@@ -180,12 +229,14 @@ def generate_for_shots(
             ]
             if p
         )
+        frame_url, frame_path = _frame_refs(session, image)
         result = run_coro(
             provider.generate(
                 VideoRequest(
                     prompt=prompt,
-                    image_uri=media_service.media_url(image),
+                    image_uri=frame_url,
                     image_media_id=image.id,
+                    image_path=frame_path,
                     duration_ms=merged["duration_ms"],
                     motion_strength=merged["motion_strength"],
                     camera_movement=merged["camera_movement"],
@@ -194,7 +245,7 @@ def generate_for_shots(
                     metadata={
                         "shot_no": shot.shot_no,
                         "simulate": (params or {}).get("simulate"),
-                        "first_frame_path": _local_path(session, image),
+                        "first_frame_path": frame_path,
                     },
                 )
             )
@@ -237,12 +288,20 @@ def generate_for_shots(
             created.append(asset.id)
             shot.video_media_id = asset.id
             shot.video_status = "CANDIDATES_READY"
+        # 视频按秒计费，单条成本可能几百上千分；不回传结算就只能按预留兜底
+        cost_cents += int(result.cost_cents or 0)
         done += 1
         if progress_cb:
             progress_cb(int(done / total * 100))
 
     session.flush()
-    return {"media_ids": created, "failures": failures, "count": len(created)}
+    return {
+        "media_ids": created,
+        "failures": failures,
+        "count": len(created),
+        "cost_cents": cost_cents,
+        "cancelled": cancelled,
+    }
 
 
 def confirm(session: Session, shot: Shot, media_id: str) -> Shot:
@@ -253,6 +312,57 @@ def confirm(session: Session, shot: Shot, media_id: str) -> Shot:
     shot.video_status = "CONFIRMED"
     session.flush()
     return shot
+
+
+def fetch_from_provider(
+    session: Session, episode: Episode, shot: Shot, task_id: str
+) -> tuple[MediaAsset, Any]:
+    """把供应商已生成、但本地没拉回来的片段取回并挂到该镜头。
+
+    不提交新任务、不产生新费用；纯粹是「把已经付过钱的东西拿回来」。
+    上游成片只保留 24 小时，过期后 `fetch_result` 会明确报「链接已过期」。
+    """
+    provider = resolve(ProviderKind.VIDEO, session)
+    fetch = getattr(provider, "fetch_result", None)
+    if fetch is None:
+        raise StateConflict("当前视频供应商不支持按任务号补拉，请改用「上传片段」")
+    result = run_coro(fetch(task_id))
+    if not result.ok:
+        raise ProviderError(
+            result.error_message or "补拉供应商片段失败",
+            details={
+                "task_id": task_id,
+                "code": result.error_code,
+                "retryable": result.retryable,
+            },
+        )
+    if not result.artifacts:
+        raise StateConflict("供应商任务没有返回任何产物")
+    artifact = result.artifacts[0]
+    asset = media_service.save_artifact(
+        session,
+        artifact,
+        kind="video",
+        role="shot_video",
+        owner_type="shot",
+        owner_id=shot.id,
+        episode_id=episode.id,
+        project_id=episode.project_id,
+        status=AssetStatus.CONFIRMED.value,
+        source="provider_fetch",
+        metadata={
+            "provider_task_id": task_id,
+            "shot_no": shot.shot_no,
+            "fetched": True,
+        },
+    )
+    if not asset.duration_ms:
+        probed = media_service.probe_duration_ms(asset)
+        if probed:
+            asset.duration_ms = probed
+    confirm(session, shot, asset.id)
+    session.flush()
+    return asset, result
 
 
 def skip(session: Session, shot: Shot, fallback: str, reason: str = "") -> Shot:

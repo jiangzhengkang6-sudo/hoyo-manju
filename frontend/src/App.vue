@@ -64,6 +64,7 @@ onMounted(async () => {
       </RouterLink>
 
       <nav class="nav-list" aria-label="主导航">
+        <span class="nav-label">导航</span>
         <RouterLink
           v-for="item in NAV"
           :key="item.to"
@@ -72,7 +73,7 @@ onMounted(async () => {
           :class="{ active: item.match(activePath) }"
         >
           <span class="nav-icon" aria-hidden="true">{{ item.icon }}</span>
-          <span>{{ item.label }}</span>
+          <span class="nav-text">{{ item.label }}</span>
         </RouterLink>
       </nav>
 
@@ -83,9 +84,10 @@ onMounted(async () => {
           <span class="badge badge-dot" :class="`badge-${healthTone}`">{{ healthLabel }}</span>
           <span v-if="version" class="mono tiny dim-2">v{{ version }}</span>
         </div>
-        <div v-if="quota" class="quota-mini mono tiny dim">
-          <span>{{ (quota.remaining_cents / 100).toFixed(2) }}</span>
-          <span class="dim-2">/ {{ (quota.limit_cents / 100).toFixed(2) }} 元可用</span>
+        <div v-if="quota" class="quota-mini">
+          <span class="quota-label">可用额度</span>
+          <span class="quota-value num">{{ (quota.remaining_cents / 100).toFixed(2) }}</span>
+          <span class="quota-cap mono tiny dim-2">/ {{ (quota.limit_cents / 100).toFixed(2) }}</span>
         </div>
         <button
           type="button"
@@ -117,12 +119,13 @@ onMounted(async () => {
   height: 100%;
 }
 
+/* 侧栏：暖墨底 + 右侧发丝线，靠明度与内容区分，不用重阴影 */
 .shell-nav {
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 16px 12px;
-  background: linear-gradient(180deg, rgba(23, 26, 34, 0.9), rgba(11, 13, 18, 0.9));
+  gap: var(--space-4);
+  padding: var(--space-5) var(--space-3) 14px;
+  background: linear-gradient(180deg, rgba(29, 26, 23, 0.92), rgba(11, 10, 9, 0.94));
   border-right: 1px solid var(--line);
   height: 100%;
   overflow: auto;
@@ -131,65 +134,87 @@ onMounted(async () => {
 .brand {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 6px 8px 12px;
+  gap: var(--space-3);
+  padding: 2px 6px 16px;
   border-bottom: 1px solid var(--line);
 }
 .brand-mark {
-  width: 34px;
-  height: 34px;
-  border-radius: 10px;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
   display: grid;
   place-items: center;
-  font-weight: 800;
-  font-size: 16px;
-  color: #08111a;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: var(--fs-16);
+  color: var(--accent-ink);
   background: var(--accent-grad);
   flex: 0 0 auto;
+  box-shadow: inset 0 1px 0 rgba(243, 237, 227, 0.28);
 }
 .brand-text {
   display: flex;
   flex-direction: column;
-  line-height: 1.25;
+  line-height: 1.3;
   min-width: 0;
 }
 .brand-name {
-  font-size: 15px;
-  font-weight: 700;
+  font-family: var(--font-display);
+  font-size: var(--fs-16);
+  font-weight: 650;
   letter-spacing: 0.02em;
 }
 .brand-sub {
-  font-size: 11px;
+  font-size: var(--fs-11);
   color: var(--text-2);
-  letter-spacing: 0.04em;
+  letter-spacing: 0.06em;
 }
 
 .nav-list {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: var(--space-1);
+}
+.nav-label {
+  font-size: var(--fs-11);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  padding: 0 10px 6px;
 }
 .nav-item {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 10px;
-  height: 36px;
+  gap: var(--space-3);
+  height: 38px;
   padding: 0 10px;
   border-radius: var(--radius-sm);
   color: var(--text-1);
-  font-size: 13.5px;
+  font-size: var(--fs-13);
   font-weight: 550;
-  border: 1px solid transparent;
-  transition: all var(--dur) var(--ease);
+  transition:
+    background var(--dur) var(--ease),
+    color var(--dur) var(--ease);
 }
 .nav-item:hover {
   background: var(--neutral-soft);
   color: var(--text-0);
 }
+/* 当前项：左侧 2px 黄铜竖条 + 极淡底色，比整块高亮更克制 */
 .nav-item.active {
   background: var(--accent-soft);
-  border-color: var(--line-accent);
   color: var(--text-0);
+}
+.nav-item.active::before {
+  content: '';
+  position: absolute;
+  left: -6px;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
 }
 .nav-item.active .nav-icon {
   color: var(--accent);
@@ -198,7 +223,14 @@ onMounted(async () => {
   width: 16px;
   text-align: center;
   color: var(--text-2);
-  font-size: 13px;
+  font-size: var(--fs-12);
+  flex: 0 0 auto;
+}
+.nav-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .nav-spacer {
@@ -208,7 +240,7 @@ onMounted(async () => {
 .nav-foot {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
   padding-top: 12px;
   border-top: 1px solid var(--line);
 }
@@ -216,17 +248,86 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-2);
 }
 .quota-mini {
   display: flex;
   align-items: baseline;
-  gap: 5px;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: rgba(243, 237, 227, 0.02);
+}
+.quota-label {
+  font-size: var(--fs-11);
+  color: var(--text-2);
+  letter-spacing: 0.06em;
+}
+.quota-value {
+  margin-left: auto;
+  font-size: var(--fs-16);
+  font-weight: 600;
+  color: var(--text-0);
+}
+.quota-cap {
+  color: var(--text-3);
 }
 
+/* 窄屏（手机 / 竖屏平板）：侧栏改为顶部横条，内容拿回全部宽度 */
+@media (max-width: 900px) {
+  .shell {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  .shell-nav {
+    flex-direction: row;
+    align-items: center;
+    gap: var(--space-2);
+    height: auto;
+    padding: 8px 10px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+  .brand {
+    padding: 0 10px 0 0;
+    border-bottom: 0;
+    flex: 0 0 auto;
+  }
+  .brand-sub,
+  .nav-label,
+  .nav-foot,
+  .nav-spacer {
+    display: none;
+  }
+  .nav-list {
+    flex-direction: row;
+    gap: 2px;
+    flex: 1 1 auto;
+  }
+  .nav-item {
+    height: 34px;
+    padding: 0 10px;
+    white-space: nowrap;
+  }
+  /* 横条上的当前项：下划线代替左侧竖条 */
+  .nav-item.active::before {
+    left: 10px;
+    right: 10px;
+    top: auto;
+    bottom: 2px;
+    width: auto;
+    height: 2px;
+  }
+}
+
+/* 主区是「壳」的容器：内部两栏按自身宽度收缩，而不是按视口 */
 .shell-main {
   min-width: 0;
   height: 100%;
   overflow: auto;
+  container-type: inline-size;
 }
 </style>

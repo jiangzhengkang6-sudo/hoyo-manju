@@ -38,3 +38,9 @@ Thumbs.db
 
 # 前端测试覆盖率报告
 frontend/coverage/
+
+# 工作台内部数据（记忆、缓存、临时状态），不随源码分发
+.workbuddy/
+
+# 本机环境补丁：仅用于绕过本机沙箱对临时目录的限制，与业务无关
+tools/sitecustomize.py

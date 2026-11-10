@@ -32,6 +32,7 @@ const barClass = computed(() =>
 const canRetry = computed(
   () => props.allowRetry && (props.job.status === 'FAILED' || props.job.status === 'EXPIRED'),
 )
+const cancelling = computed(() => props.job.status === 'CANCELLING')
 const canCancel = computed(
   () =>
     props.allowCancel &&
@@ -71,7 +72,7 @@ const canCancel = computed(
       <span class="mono">{{ job.error_code || 'ERROR' }}</span> · {{ job.error_message }}
     </p>
 
-    <div v-if="canRetry || canCancel" class="job-actions">
+    <div v-if="canRetry || canCancel || cancelling" class="job-actions">
       <button
         v-if="canRetry"
         type="button"
@@ -82,13 +83,18 @@ const canCancel = computed(
         重试
       </button>
       <button
-        v-if="canCancel"
+        v-if="canCancel || cancelling"
         type="button"
         class="btn btn-sm btn-ghost"
-        :disabled="busy"
+        :disabled="busy || cancelling"
+        :title="
+          cancelling
+            ? '正在停止：当前这一张/一条跑完就结束'
+            : '已提交的这一张会跑完（照常计费），之后不再继续'
+        "
         @click="emit('cancel', job.id)"
       >
-        取消
+        {{ cancelling ? '停止中…' : '停止生成' }}
       </button>
     </div>
   </div>
@@ -99,16 +105,16 @@ const canCancel = computed(
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--panel-2);
-  padding: 10px 12px;
+  padding: var(--space-3) var(--space-3);
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: var(--space-2);
 }
 .job-top {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-2);
 }
 .job-id {
   max-width: 190px;
@@ -120,7 +126,7 @@ const canCancel = computed(
 .job-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 12px;
+  gap: var(--space-1) 12px;
 }
 .job-error {
   color: var(--danger);
@@ -128,6 +134,6 @@ const canCancel = computed(
 }
 .job-actions {
   display: flex;
-  gap: 8px;
+  gap: var(--space-2);
 }
 </style>

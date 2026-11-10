@@ -19,6 +19,7 @@ from app.db.models import Job, JobStatus
 from app.db.session import init_db, session_scope
 from app.services import executor as executor_service
 from app.services import jobs as jobs_service
+from app.services import recovery as recovery_service
 
 WORKER_ID = f"worker-{os.getpid()}-{uuid.uuid4().hex[:6]}"
 
@@ -34,6 +35,7 @@ class Worker:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self.last_reap = dt.datetime.now(dt.timezone.utc)
+        self.last_recover = dt.datetime.now(dt.timezone.utc)
 
     # ------------------------------------------------------------------ #
     def tick(self) -> int:
@@ -48,13 +50,19 @@ class Worker:
             return 0
         claimed: list[str] = []
         with session_scope() as session:
-            if (dt.datetime.now(dt.timezone.utc) - self.last_reap).total_seconds() > 30:
+            now = dt.datetime.now(dt.timezone.utc)
+            if (now - self.last_reap).total_seconds() > 30:
                 reaped = jobs_service.reap_expired_leases(session)
                 # 非终态堆积过久（排队/重试退避后长期无人接管）→ EXPIRED（FR-070）
                 expired = jobs_service.expire_stale_jobs(session)
                 if reaped or expired:
                     session.flush()
-                self.last_reap = dt.datetime.now(dt.timezone.utc)
+                self.last_reap = now
+            # 补拉窗口只有 24 小时（供应商成片过期就没了），所以每轮都看一眼。
+            # 单个任务有 5 分钟间隔与次数上限，不会把网关问炸。
+            if (now - self.last_recover).total_seconds() > 60:
+                recovery_service.sweep(session, limit=3)
+                self.last_recover = now
             for job_id in jobs_service.next_queued_job_ids(session, limit=free):
                 if jobs_service.claim_job(session, job_id, WORKER_ID):
                     claimed.append(job_id)

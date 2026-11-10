@@ -1,16 +1,8 @@
 import { ApiError, networkError, parseErrorResponse } from './errors'
+import { API_PREFIX, apiUrl } from './base'
 
-/** 统一 API 前缀。API.md：所有接口前缀 `/api/v1`。 */
-export const API_PREFIX = '/api/v1'
-
-/** 允许通过 VITE_API_BASE 指向别的后端（如 http://127.0.0.1:18437）。 */
-const API_BASE = (import.meta.env.VITE_API_BASE ?? '').replace(/\/$/, '')
-
-export function apiUrl(path: string): string {
-  const clean = path.startsWith('/') ? path : `/${path}`
-  if (clean.startsWith('/api/')) return `${API_BASE}${clean}`
-  return `${API_BASE}${API_PREFIX}${clean}`
-}
+// 基址/前缀的实现搬到 ./base（纯函数，避免被 mock 后媒体地址拼不出来），这里转发保持旧引用可用
+export { API_PREFIX, apiUrl }
 
 /* ------------------------------------------------------------------ *
  * 全局 toast 通道（避免 api 层直接依赖 Pinia store 造成循环引用）

@@ -22,7 +22,7 @@ withDefaults(
 
 <style scoped>
 .stat-tile {
-  padding: 12px 14px;
+  padding: var(--space-3) var(--space-4);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--panel);
@@ -33,19 +33,22 @@ withDefaults(
   border-color: var(--line-strong);
 }
 .stat-label {
-  font-size: 11.5px;
+  font-size: var(--fs-11);
   letter-spacing: 0.05em;
   color: var(--text-2);
   text-transform: uppercase;
 }
 .stat-value {
-  font-size: 20px;
-  font-weight: 650;
-  margin-top: 3px;
-  letter-spacing: -0.01em;
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-24);
+  font-weight: 600;
+  margin-top: 2px;
+  letter-spacing: 0;
+  line-height: 1.2;
 }
 .stat-hint {
-  font-size: 11.5px;
+  font-size: var(--fs-11);
   color: var(--text-2);
   margin-top: 2px;
 }

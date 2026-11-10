@@ -29,6 +29,15 @@ export const episodesApi = {
 
   restore: (episodeId: string) => http.post<Episode>(`/episodes/${episodeId}/restore`),
 
+  /**
+   * **彻底删除**剧集（不可恢复）：连同剧本、分镜、角色卡、音视频、导出记录一起删。
+   * 只想隐藏请用 `archive()`（可恢复）。
+   */
+  remove: (episodeId: string) =>
+    http.del<{ deleted: boolean; episode_id: string; media_files: number }>(
+      `/episodes/${episodeId}`,
+    ),
+
   cost: (episodeId: string) => http.get<CostSummary>(`/episodes/${episodeId}/cost`),
 }
 

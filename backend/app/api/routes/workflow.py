@@ -31,10 +31,15 @@ def start_workflow(episode_id: str, payload: WorkflowStart, session: SessionDep)
         .order_by(StoryDocument.version.desc())
         .limit(1)
     )
+    # 已有可用剧本时默认复用：用户在「故事与剧本」页生成（甚至手改）过的剧本，
+    # 不该因为「启动工作流」再被模型重写一遍（既扣钱又覆盖人工修改）。
+    has_script = bool(document is not None and (document.story_json or {}).get("shots"))
+    reuse_script = payload.reuse_script if payload.reuse_script is not None else has_script
     run = workflow_engine.start(
         session,
         episode,
         source_text=document.source_text if document else "",
+        reuse_script=reuse_script,
     )
     session.flush()
     return workflow_engine.snapshot(session, run)

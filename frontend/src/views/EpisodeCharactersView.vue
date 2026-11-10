@@ -9,20 +9,21 @@ import { useEpisodeStore } from '@/stores/episode'
 import { useConfigStore } from '@/stores/config'
 import { useToastStore } from '@/stores/toast'
 import { reportError } from '@/api/client'
-import { jobsApi } from '@/api/jobs'
+import { cancelJob as cancelJobRequest, jobsApi, fetchJobs } from '@/api/jobs'
 import { audioApi, fetchVoices } from '@/api/audio'
 import {
   ASSET_KINDS,
   ASSET_KIND_LABEL,
   charactersApi,
   fetchCharacterAssets,
-  fetchCharacters,
+  fetchCharacterList,
   fetchStyles,
   stylesApi,
 } from '@/api/characters'
 import { relativeTime } from '@/utils/format'
 import { ApiError, toApiError } from '@/api/errors'
 import GateCard from '@/components/GateCard.vue'
+import StageHead from '@/components/StageHead.vue'
 import JobInline from '@/components/JobInline.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import SkeletonBlock from '@/components/SkeletonBlock.vue'
@@ -60,6 +61,10 @@ const characters = ref<Character[]>([])
 const styles = ref<StyleAsset[]>([])
 const loading = ref(false)
 const error = ref<ApiError | null>(null)
+/** 被「只看本集」挡掉的其他剧集角色数。 */
+const hiddenCount = ref(0)
+/** 是否连其他剧集的角色一起看。 */
+const showAllCharacters = ref(false)
 
 const activeCharacter = ref<Character | null>(null)
 const assets = ref<CharacterAsset[]>([])
@@ -73,6 +78,8 @@ const showStyleForm = ref(false)
 
 const busy = ref(false)
 const gateBusy = ref(false)
+/** 「从剧本同步」进行中（剧本抓取是同步接口，但可能建几十个角色，仍要给反馈）。 */
+const syncBusy = ref(false)
 const notice = ref('')
 const jobIds = ref<string[]>([])
 const affectedShots = ref<number[]>([])
@@ -124,7 +131,14 @@ async function loadCharacters(): Promise<void> {
   loading.value = true
   error.value = null
   try {
-    characters.value = await fetchCharacters(projectId.value)
+    // 角色卡是项目级资产库，但同项目下可能有多集互不相干的故事：
+    // 默认只显示本集剧本里出现的角色（+ 手工新增的公共角色）。
+    const page = await fetchCharacterList(projectId.value, {
+      episodeId: store.episodeId ?? undefined,
+      includeAll: showAllCharacters.value,
+    })
+    characters.value = page.items
+    hiddenCount.value = page.hidden
   } catch (err) {
     error.value = toApiError(err)
   } finally {
@@ -132,9 +146,53 @@ async function loadCharacters(): Promise<void> {
   }
 }
 
+/** 切换「只看本集 / 看全部角色」。 */
+async function toggleAllCharacters(): Promise<void> {
+  showAllCharacters.value = !showAllCharacters.value
+  await loadCharacters()
+}
+
 async function loadStyles(): Promise<void> {
   if (!projectId.value) return
   styles.value = await fetchStyles(projectId.value).catch(() => [])
+}
+
+/* ---------------- 剧本 → 角色卡（生成剧本时自动抓，这里可手动重抓） ---------------- */
+
+/**
+ * 从本集最新剧本重新抓取角色卡。
+ * 默认不覆盖手改过的字段（后端按 `_user_edited` 判定），`force` 才会整体覆盖。
+ */
+async function syncFromScript(force = false): Promise<void> {
+  const id = store.episodeId
+  if (!id || syncBusy.value) return
+  syncBusy.value = true
+  try {
+    const result = await charactersApi.syncFromEpisode(id, force)
+    // 重新按「本集」口径拉一遍，hidden 计数也要跟着更新
+    await loadCharacters()
+    if (result.created + result.updated > 0) {
+      toast.success(
+        '已从剧本抓取角色',
+        `新增 ${result.created} 个 · 更新 ${result.updated} 个 · 共 ${result.total} 个`,
+      )
+    } else {
+      toast.info(
+        '角色卡已是最新',
+        `剧本 v${result.script_version ?? '—'} 的 ${result.total} 个角色都在，未做改动`,
+      )
+    }
+  } catch (err) {
+    const apiErr = toApiError(err)
+    if (apiErr.status === 404) {
+      // 还没生成剧本是正常前置缺失，不要报成「加载失败」
+      toast.warn('还没有剧本', '请先在「故事与剧本」生成剧本，再抓取角色')
+    } else {
+      toast.error('抓取角色失败', apiErr.message)
+    }
+  } finally {
+    syncBusy.value = false
+  }
 }
 
 /* ---------------- FR-050 音色绑定 / FR-051 语速 ---------------- */
@@ -223,15 +281,53 @@ async function previewVoice(voiceId: string): Promise<void> {
   }
 }
 
+async function loadRecentJobs(): Promise<void> {
+  if (!projectId.value) return
+  try {
+    // 角色生成任务是项目级的（不带 episode_id），刷新页面后也要能看到历史
+    const page = await fetchJobs({
+      project_id: projectId.value,
+      type: 'CHARACTER_ASSET_GENERATION',
+      page_size: 10,
+    })
+    if (page.items.length) jobIds.value = page.items.map((job) => job.id)
+  } catch {
+    /* 历史任务拉不到不影响主流程 */
+  }
+}
+
 onMounted(async () => {
   await config.load()
-  await Promise.all([loadCharacters(), loadStyles(), loadVoices()])
+  await Promise.all([loadCharacters(), loadStyles(), loadVoices(), loadRecentJobs()])
 })
 
 watch(projectId, async (next) => {
   if (!next) return
-  await Promise.all([loadCharacters(), loadStyles(), loadVoices()])
+  await Promise.all([loadCharacters(), loadStyles(), loadVoices(), loadRecentJobs()])
 })
+
+/**
+ * 参考图生成成功的瞬间刷新角色卡与素材。
+ *
+ * 之前任务跑到 100% 后卡片仍是「暂无素材」，必须整页刷新；而刷新后任务面板也空了，
+ * 用户既看不到图、也找不到任务 —— 生成的东西像是「凭空消失」。
+ */
+watch(
+  () => jobs.value.map((job) => `${job.id}:${job.status}`).join('|'),
+  async (next, prev) => {
+    if (!prev) return
+    const before = new Set(prev.split('|'))
+    const succeeded = next
+      .split('|')
+      .some((item) => !before.has(item) && item.endsWith(':SUCCEEDED'))
+    if (!succeeded) return
+    const keepId = activeCharacter.value?.id ?? null
+    await loadCharacters()
+    if (!keepId) return
+    const refreshed = characters.value.find((c) => c.id === keepId)
+    if (refreshed) await openCharacter(refreshed)
+  },
+)
 
 async function openCharacter(character: Character): Promise<void> {
   activeCharacter.value = character
@@ -296,6 +392,8 @@ async function submitCharacter(): Promise<void> {
       .split(/[、,，\n]/)
       .map((s) => s.trim())
       .filter(Boolean),
+    // 在某一集里新建的角色只属于这一集，避免同名角色串到其他剧集
+    episode_id: store.episodeId ?? null,
   }
   try {
     if (editingId.value) {
@@ -456,8 +554,8 @@ async function retryJob(id: string): Promise<void> {
 
 async function cancelJob(id: string): Promise<void> {
   try {
-    const res = await jobsApi.cancel(id)
-    if (res.job) store.trackJob(res.job)
+    const job = await cancelJobRequest(id)
+    if (job) store.trackJob(job)
   } catch {
     /* api 层已提示 */
   }
@@ -505,10 +603,54 @@ function handleGateError(err: unknown): void {
   }
   reportError(err, '门控决策')
 }
+
+/** 从当前阶段启动工作流（已有剧本会被复用，不会重新生成）。 */
+async function startWorkflow(): Promise<void> {
+  if (gateBusy.value) return
+  gateBusy.value = true
+  try {
+    const run = await store.startWorkflow()
+    if (run?.pending_gate === 'gate_script_confirmation') {
+      toast.info('工作流已启动', '先到「故事与剧本」确认剧本，再回到这里确认角色')
+    } else {
+      toast.success('工作流已启动', run?.pending_gate ? '已停在待确认门控' : '')
+    }
+  } catch (err) {
+    const apiErr = toApiError(err)
+    toast.error('启动工作流失败', apiErr.message)
+  } finally {
+    gateBusy.value = false
+  }
+}
+
+/** 音色性别说人话，别把 female / male 直接拼进下拉项。 */
+const GENDER_LABELS: Record<string, string> = { female: '女声', male: '男声', neutral: '中性' }
+function genderLabel(gender: string): string {
+  return GENDER_LABELS[gender.toLowerCase()] ?? ''
+}
 </script>
 
 <template>
   <div class="stage">
+    <StageHead
+      index="02"
+      title="角色与画风"
+      description="角色参考图与画风决定整部剧的画面一致性；先定角色卡，再批量出图。"
+    />
+    <!-- 工作流没启动时，页面上的门控按钮全是禁用的；这里给出可执行的下一步，
+         而不是让用户对着灰色的「确认角色与画风」猜原因。 -->
+    <div v-if="!workflow" class="card notice-banner">
+      <div>
+        <strong>工作流还没启动</strong>
+        <p class="tiny dim">
+          启动后会接着当前剧本往下走（<b>不会重新生成剧本、不再扣一次模型费</b>），
+          并停在「剧本确认」门控；确认剧本后才进入角色与画风。
+        </p>
+      </div>
+      <button type="button" class="btn btn-primary btn-sm" :disabled="gateBusy" @click="startWorkflow">
+        {{ gateBusy ? '启动中…' : '启动工作流' }}
+      </button>
+    </div>
     <GateCard
       :gate="pendingGate"
       :workflow="workflow"
@@ -533,6 +675,15 @@ function handleGateError(err: unknown): void {
         <div class="card-head">
           <h2 class="title-md">角色卡</h2>
           <div class="row">
+            <button
+              type="button"
+              class="btn btn-sm btn-ghost"
+              :disabled="syncBusy"
+              title="从本集最新剧本的人物表抓取角色；不会覆盖你手改过的字段"
+              @click="syncFromScript()"
+            >
+              {{ syncBusy ? '抓取中…' : '从剧本同步' }}
+            </button>
             <button type="button" class="btn btn-sm btn-ghost" @click="loadCharacters">刷新</button>
             <button type="button" class="btn btn-sm btn-primary" @click="openCreateCharacter">
               新增角色
@@ -540,15 +691,30 @@ function handleGateError(err: unknown): void {
           </div>
         </div>
         <div class="card-body">
+          <p v-if="hiddenCount || showAllCharacters" class="tiny dim char-scope">
+            <span v-if="showAllCharacters">正在显示项目内全部角色（含其他剧集的故事）。</span>
+            <span v-else>已隐藏 {{ hiddenCount }} 个「其他剧集」的角色。</span>
+            <button type="button" class="btn btn-sm btn-ghost" @click="toggleAllCharacters">
+              {{ showAllCharacters ? '只看本集' : '显示全部' }}
+            </button>
+          </p>
           <ErrorState v-if="error" :error="error" context="加载角色" compact @retry="loadCharacters" />
           <SkeletonBlock v-else-if="loading && !characters.length" variant="cards" :rows="3" />
           <EmptyState
             v-else-if="!characters.length"
             icon="☺"
             title="还没有角色"
-            description="角色卡决定人物形象一致性，请先创建主要角色。"
+            description="生成剧本后会从人物表自动抓取角色；也可以手动新增。"
           >
-            <button type="button" class="btn btn-primary btn-sm" @click="openCreateCharacter">
+            <button
+              type="button"
+              class="btn btn-primary btn-sm"
+              :disabled="syncBusy"
+              @click="syncFromScript()"
+            >
+              从剧本同步
+            </button>
+            <button type="button" class="btn btn-ghost btn-sm" @click="openCreateCharacter">
               新增角色
             </button>
           </EmptyState>
@@ -571,6 +737,9 @@ function handleGateError(err: unknown): void {
                 </div>
                 <p class="tiny dim ellipsis">{{ character.identity || '未填写身份' }}</p>
                 <div class="row-wrap">
+                  <span v-if="character.source === 'script'" class="badge badge-info">剧本抓取</span>
+                  <span v-else class="badge badge-muted">手动创建</span>
+                  <span v-if="character.user_edited" class="badge badge-warn">已手改</span>
                   <span v-if="character.voice_id" class="badge badge-info">
                     音色 {{ voiceName(character.voice_id) }}
                   </span>
@@ -588,7 +757,7 @@ function handleGateError(err: unknown): void {
                   >
                     <option value="">（未绑定）</option>
                     <option v-for="voice in voices" :key="voice.id" :value="voice.id">
-                      {{ voice.name }}{{ voice.gender ? ` · ${voice.gender}` : '' }}
+                      {{ voice.name }}{{ voice.gender ? ` · ${genderLabel(voice.gender)}` : '' }}
                     </option>
                   </select>
                   <label class="voice-speed">
@@ -724,7 +893,7 @@ function handleGateError(err: unknown): void {
           <button type="button" class="btn btn-sm btn-ghost" @click="activeCharacter = null">收起</button>
         </div>
       </div>
-      <div class="card-body col" style="gap: 14px">
+      <div class="card-body col" style="gap: var(--space-4)">
         <dl class="kv">
           <dt>身份</dt>
           <dd>{{ activeCharacter.identity || '—' }}</dd>
@@ -873,7 +1042,7 @@ function handleGateError(err: unknown): void {
           :max="config.candidateMax"
         />
         <span class="hint">
-          单次生成上限参考 /config/limits.candidates_per_shot_max（{{ config.candidateMax }}）
+          单次最多生成 {{ config.candidateMax }} 张（后台配置）
         </span>
       </div>
       <template #footer>
@@ -923,7 +1092,7 @@ function handleGateError(err: unknown): void {
       </div>
       <div class="field">
         <label class="label" for="s-palette">色板（空格或逗号分隔）</label>
-        <input id="s-palette" v-model="styleForm.palette" class="input mono" placeholder="#1B2A41 #38BDF8" />
+        <input id="s-palette" v-model="styleForm.palette" class="input mono" placeholder="#1B2A41 var(--accent)" />
       </div>
       <div class="form-row">
         <div class="field">
@@ -960,31 +1129,37 @@ function handleGateError(err: unknown): void {
 </template>
 
 <style scoped>
-.stage {
+/* 「工作流未启动」提示条：左侧说明 + 右侧启动按钮 */
+.notice-banner {
   display: flex;
-  flex-direction: column;
-  gap: var(--gap);
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
 }
-.two-col {
-  display: grid;
-  grid-template-columns: 1.4fr 1fr;
-  gap: var(--gap);
-  align-items: start;
+/* 「已隐藏 N 个其他剧集角色」行 */
+.char-scope {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0 0 8px;
 }
-@media (max-width: 1120px) {
-  .two-col {
-    grid-template-columns: 1fr;
-  }
+.notice-banner p {
+  margin: 4px 0 0;
+  line-height: 1.6;
+}
+.notice-banner b {
+  color: var(--text-0);
 }
 .char-list {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
   gap: var(--gap);
 }
 .char-card {
   display: flex;
-  gap: 10px;
-  padding: 10px;
+  gap: var(--space-3);
+  padding: var(--space-3);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--panel-2);
@@ -1008,11 +1183,11 @@ function handleGateError(err: unknown): void {
   position: absolute;
   left: 3px;
   bottom: 3px;
-  font-size: 9.5px;
+  font-size: var(--fs-11);
   padding: 1px 5px;
   border-radius: var(--radius-pill);
   background: var(--ok-soft);
-  border: 1px solid rgba(52, 211, 153, 0.45);
+  border: 1px solid rgba(111, 191, 147, 0.45);
   color: var(--ok);
 }
 .char-body {
@@ -1020,7 +1195,7 @@ function handleGateError(err: unknown): void {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: var(--space-2);
 }
 .style-list {
   list-style: none;
@@ -1028,24 +1203,24 @@ function handleGateError(err: unknown): void {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 9px;
+  gap: var(--space-3);
 }
 .style-item {
-  padding: 10px 12px;
+  padding: var(--space-3) var(--space-3);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--panel-2);
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: var(--space-2);
 }
 .style-item.default {
-  border-color: rgba(52, 211, 153, 0.35);
+  border-color: rgba(111, 191, 147, 0.35);
 }
 .asset-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
-  gap: 12px;
+  gap: var(--space-3);
 }
 .asset-item {
   margin: 0;
@@ -1055,21 +1230,21 @@ function handleGateError(err: unknown): void {
   overflow: hidden;
 }
 .asset-item.primary {
-  border-color: rgba(52, 211, 153, 0.5);
+  border-color: rgba(111, 191, 147, 0.5);
 }
 .asset-cap {
-  padding: 8px 10px 10px;
+  padding: var(--space-2) var(--space-3) 10px;
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: var(--space-2);
 }
 .form-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 12px;
+  gap: var(--space-3);
 }
 .affected {
-  padding: 10px;
+  padding: var(--space-3);
   border: 1px dashed var(--line-strong);
   border-radius: var(--radius-sm);
 }
@@ -1078,7 +1253,7 @@ function handleGateError(err: unknown): void {
 .voice-picker {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-2);
   flex-wrap: wrap;
 }
 .voice-select {
@@ -1086,25 +1261,25 @@ function handleGateError(err: unknown): void {
   min-width: 120px;
   height: 26px;
   padding: 0 6px;
-  font-size: 12px;
+  font-size: var(--fs-12);
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-sm);
-  background: var(--surface);
+  background: var(--panel-2);
   color: inherit;
 }
 .voice-speed {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-1);
 }
 .voice-speed-input {
   width: 62px;
   height: 26px;
   padding: 0 6px;
-  font-size: 12px;
+  font-size: var(--fs-12);
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-sm);
-  background: var(--surface);
+  background: var(--panel-2);
   color: inherit;
 }
 .voice-preview-audio {

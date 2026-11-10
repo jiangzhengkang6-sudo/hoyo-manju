@@ -46,6 +46,7 @@ JOB_TYPE_KIND: dict[str, str] = {
     "IMAGE_GENERATION": degraded.KIND_IMAGE,
     "VIDEO_GENERATION": degraded.KIND_VIDEO,
     "TTS_GENERATION": degraded.KIND_SPEECH,
+    "BGM_GENERATION": degraded.KIND_SPEECH,
     "RENDER_PREVIEW": degraded.KIND_STORAGE,
     "RENDER_EXPORT": degraded.KIND_STORAGE,
 }
@@ -215,10 +216,24 @@ def handle_story_generation(session: Session, job: Job) -> dict[str, Any]:
     episode.stage = EpisodeStage.SCRIPT_REVIEW.value
     session.flush()
 
+    # 剧本一生成就把人物表抓成角色卡：用户停在「故事与剧本」页也能直接去
+    # 「角色与画风」改设定，不必先把工作流跑到角色节点（那时角色页才是空的）。
+    from app.agents import character as character_agent
+
+    synced = character_agent.sync_characters_from_script(
+        session, project, script, document=document, episode_id=episode.id
+    )
+
     return {
         "story_document_id": document.id,
         "version": version,
         "shot_count": len(shots),
+        "characters_synced": {
+            "created": len(synced["created"]),
+            "updated": len(synced["updated"]),
+            "total": len(synced["characters"]),
+            "names": [c.name for c in synced["characters"]],
+        },
         "provider_calls": [
             {
                 "provider": job.provider,
@@ -317,7 +332,7 @@ def handle_character_assets(session: Session, job: Job) -> dict[str, Any]:
         raise AppError("角色不存在", code=ErrorCode.NOT_FOUND)
     project = session.get(Project, character.project_id)
     style = character_agent.project_style(session, project)
-    assets, cost_cents = character_agent.generate_assets(
+    assets, cost_cents, cancelled = character_agent.generate_assets(
         session,
         character=character,
         asset_kinds=payload.get("asset_kinds") or ["setting", "front"],
@@ -325,12 +340,14 @@ def handle_character_assets(session: Session, job: Job) -> dict[str, Any]:
         project=project,
         style=style,
         progress_cb=lambda pct: (jobs_service.set_progress(session, job, pct), session.commit()),
+        should_cancel=jobs_service.cancel_probe(job.id),
     )
     return {
         "media_ids": [a.id for a in assets],
         "count": len(assets),
         "character_id": character.id,
         "cost_cents": cost_cents,
+        "cancelled": cancelled,
     }
 
 
@@ -366,8 +383,12 @@ def handle_image_generation(session: Session, job: Job) -> dict[str, Any]:
         shots=shots,
         candidates_per_shot=int(payload.get("candidates_per_shot") or settings.candidates_per_shot_default),
         progress_cb=lambda pct: (jobs_service.set_progress(session, job, pct), session.commit()),
+        should_cancel=jobs_service.cancel_probe(job.id),
     )
-    if result["failures"] and not result["media_ids"]:
+    # 中途取消不是失败：已生成的候选保留，剩下的不再花钱
+    if result.get("cancelled"):
+        result["note"] = "已按请求停止：已生成的候选保留，后续镜头未提交"
+    elif result["failures"] and not result["media_ids"]:
         first = result["failures"][0]
         raise AppError(
             first.get("message") or "图像生成全部失败",
@@ -399,8 +420,11 @@ def handle_video_generation(session: Session, job: Job) -> dict[str, Any]:
         shots=shots,
         params=payload.get("params") or {},
         progress_cb=lambda pct: (jobs_service.set_progress(session, job, pct), session.commit()),
+        should_cancel=jobs_service.cancel_probe(job.id),
     )
-    if result["failures"] and not result["media_ids"]:
+    if result.get("cancelled"):
+        result["note"] = "已按请求停止：已出片的镜头保留，后续镜头未提交"
+    elif result["failures"] and not result["media_ids"]:
         first = result["failures"][0]
         raise AppError(
             first.get("message") or "视频生成全部失败",
@@ -424,6 +448,7 @@ def handle_tts(session: Session, job: Job) -> dict[str, Any]:
         episode=episode,
         shots=shots,
         progress_cb=lambda pct: (jobs_service.set_progress(session, job, pct), session.commit()),
+        only_character_id=payload.get("character_id") or None,
     )
     if result["failures"] and not result["media_ids"]:
         first = result["failures"][0]
@@ -435,6 +460,28 @@ def handle_tts(session: Session, job: Job) -> dict[str, Any]:
         )
     episode.stage = EpisodeStage.AUDIO_REVIEW.value
     return result
+
+
+@handler("BGM_GENERATION")
+def handle_bgm(session: Session, job: Job) -> dict[str, Any]:
+    """生成一轨氛围音 / BGM 并挂到时间线（分层方案：不与台词混在一起）。"""
+    from app.agents import audio as audio_agent
+
+    episode = _episode(session, job)
+    payload = job.input_json or {}
+    return audio_agent.generate_ambience(
+        session,
+        episode=episode,
+        prompt=str(payload.get("prompt") or ""),
+        seconds=payload.get("seconds"),
+        shot_no=payload.get("shot_no"),
+        shot_from=payload.get("shot_from"),
+        shot_to=payload.get("shot_to"),
+        volume_db=payload.get("volume_db"),
+        fade_in_ms=int(payload.get("fade_in_ms") or 800),
+        fade_out_ms=int(payload.get("fade_out_ms") or 1500),
+        progress_cb=lambda pct: (jobs_service.set_progress(session, job, pct), session.commit()),
+    )
 
 
 @handler("SUBTITLE_GENERATION")
@@ -463,13 +510,14 @@ def handle_render_preview(session: Session, job: Job) -> dict[str, Any]:
             kind="preview",
             preset="preview",
             watermark=bool(payload.get("watermark", True)),
+            only_ready=bool(payload.get("partial", False)),
             progress_cb=_progress(session, job),
         )
     except RenderError as exc:
         record.status = "FAILED"
         record.error_code = exc.code
         record.error_message = exc.message
-        record.error_detail = exc.details
+        record.error_detail = jobs_service.jsonable(exc.details)
         session.flush()
         raise
     record.status = "SUCCEEDED"
@@ -513,7 +561,7 @@ def handle_render_export(session: Session, job: Job) -> dict[str, Any]:
         record.status = "FAILED"
         record.error_code = exc.code
         record.error_message = exc.message
-        record.error_detail = exc.details
+        record.error_detail = jobs_service.jsonable(exc.details)
         session.flush()
         raise
     record.status = "SUCCEEDED"
@@ -567,6 +615,33 @@ def handle_export_package(session: Session, job: Job) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # 执行
 # --------------------------------------------------------------------------- #
+
+def _submitted_job_ids(calls: list[dict[str, Any]]) -> list[str]:
+    """本次尝试里「已经提交到供应商」的任务 id（去重保序）。"""
+    seen: list[str] = []
+    for call in calls:
+        job_id = str(call.get("provider_job_id") or "").strip()
+        if job_id and job_id not in seen:
+            seen.append(job_id)
+    return seen
+
+
+def _release_reason(exc: AppError, calls: list[dict[str, Any]]) -> str:
+    """失败释放的账本备注。
+
+    任务已经提交到供应商、之后才失败时，网关侧很可能已经扣了费——
+    本地额度全额退回是对的（我们确实没拿到产物），但账本要留下网关任务 id，
+    否则用户只看到「失败」，而供应商后台显示「成功、已扣积分」，对不上账。
+    """
+    note = f"失败释放：{exc.message}"
+    submitted = _submitted_job_ids(calls)
+    if submitted:
+        note += (
+            f"（供应商任务 {'、'.join(submitted[:3])} 可能已计费，本地未扣；"
+            "可在供应商控制台核对）"
+        )
+    return note
+
 
 def _persist_calls(session: Session, job: Job, calls: list[dict[str, Any]]) -> None:
     """把供应商调用写入 ProviderCall，供任务详情与审计查看（需求 §9.2）。
@@ -638,10 +713,18 @@ def run_job(
 
         _persist_calls(session, job, [*(result.pop("provider_calls", []) or []), *calls])
 
-        settled = int(result.get("cost_cents") or job.cost_reserved_cents or 0)
+        # 实际消耗以处理器回传为准（含 0：取消得太早、一张都没生成时就是 0）。
+        # 不能用 `or` 兜底——0 会被当成「没给值」，于是把整笔预留都结算掉。
+        settled = (
+            int(result["cost_cents"])
+            if "cost_cents" in result and result["cost_cents"] is not None
+            else int(job.cost_reserved_cents or 0)
+        )
         cost_service.settle(session, job=job, actual_cents=settled)
 
-        if job.cancel_requested:
+        if job.cancel_requested and result.get("cancelled") is True:
+            # 只有「真的提前停下」才算取消；取消信号晚到、活已干完的按成功记账，
+            # 否则会出现「产物都齐了却显示已取消」的怪状态。
             jobs_service.set_status(session, job, JobStatus.CANCELLED.value,
                                     result_ref=result)
         else:
@@ -650,19 +733,33 @@ def run_job(
             )
         session.commit()
     except AppError as exc:
+        # 异常可能是在 flush/commit 途中抛的（例如结果里混进 datetime 导致
+        # StatementError）。不先 rollback 的话 session 停在 PendingRollback 状态，
+        # 后面写失败原因、安排重试都会再次抛错，任务就永远卡在 RUNNING。
+        session.rollback()
         _persist_calls(session, job, calls)
         # FR-072 自动重试：可重试的错误且还有剩余次数时，退避后重入队。
         # 此时**不释放**配额预留——预留跨尝试保持，等任务最终终结时才释放，
         # 保证「预留→结算」口径不会被自动重试打断。
-        if allow_auto_retry and jobs_service.schedule_auto_retry(
-            session, job, retryable=bool(exc.retryable)
+        #
+        # 但「已经提交到供应商」的失败不能自动重试：任务在网关侧已经跑起来了，
+        # 再走一遍就是重新下单、重新计费。这种情况交给用户决定（看控制台 / 手动重试）。
+        submitted_ids = _submitted_job_ids(calls)
+        if (
+            allow_auto_retry
+            and not submitted_ids
+            and jobs_service.schedule_auto_retry(
+                session, job, retryable=bool(exc.retryable)
+            )
         ):
             job.error_code = exc.code
             job.error_message = exc.message
-            job.error_detail = exc.details or {}
+            job.error_detail = jobs_service.jsonable(exc.details or {})
             session.commit()
         else:
-            cost_service.release(session, job=job, reason=f"失败释放：{exc.message}")
+            cost_service.release(
+                session, job=job, reason=_release_reason(exc, calls)
+            )
             jobs_service.set_status(
                 session,
                 job,
@@ -675,6 +772,7 @@ def run_job(
             # §12：任务最终失败且属于「供应商/存储侧」问题时，累计到阈值即暂停该类新任务
             _note_degrade(session, job, exc)
     except Exception as exc:  # noqa: BLE001 - 兜底，保留原始错误
+        session.rollback()
         _persist_calls(session, job, calls)
         # 未预期异常同样给一次自动重试机会，避免瞬时故障直接判死
         if allow_auto_retry and jobs_service.schedule_auto_retry(session, job, retryable=True):

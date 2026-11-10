@@ -37,6 +37,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger("hoyomanju")
 
+# 供应商出网代理策略：`PROVIDER_PROXY_URL` 为空时保持跟随环境变量（默认），
+# 设为 direct 可摆脱 IDE/沙箱注入的本地代理（它们常常把请求变成 502）。
+from app.providers.net import apply_provider_proxy  # noqa: E402
+
+_proxy_mode = apply_provider_proxy()
+if _proxy_mode != "env":
+    logger.info("供应商出网代理策略：%s", _proxy_mode)
+
 API_PREFIX = "/api/v1"
 
 embedded_worker: EmbeddedWorker | None = None

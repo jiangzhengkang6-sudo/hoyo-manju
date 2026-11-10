@@ -156,7 +156,13 @@ def _shot_transition(shot: Shot) -> dict[str, Any] | None:
     return parse_transition((shot.shot_json or {}).get("transition"))
 
 
-def estimate_render(session: Session, episode: Episode, *, kind: str = "preview") -> dict[str, Any]:
+def estimate_render(
+    session: Session,
+    episode: Episode,
+    *,
+    kind: str = "preview",
+    only_ready: bool = False,
+) -> dict[str, Any]:
     """合成成本预估（FR-010 / §12-6）。
 
     合成本身不调用外部供应商，但占用算力配额：按输出时长（秒）× 单价计价，
@@ -164,7 +170,7 @@ def estimate_render(session: Session, episode: Episode, *, kind: str = "preview"
     """
     import math
 
-    timeline = build_timeline(session, episode)
+    timeline = build_timeline(session, episode, only_ready=only_ready)
     seconds = max(timeline["total_duration_ms"], 0) / 1000.0
     unit = int(settings.render_price_per_second_cents)
     quantity = math.ceil(seconds) if seconds else 0
@@ -196,56 +202,91 @@ def _ordered_shots(session: Session, episode_id: str) -> list[Shot]:
     )
 
 
-def build_timeline(session: Session, episode: Episode) -> dict[str, Any]:
+def build_timeline(session: Session, episode: Episode, *, only_ready: bool = False) -> dict[str, Any]:
+    """构建时间线。
+
+    `only_ready=True` 用于「部分预览」：只保留已有画面/视频的镜头，把未就绪的
+    镜头（placeholder）从时间线里剔除、后面的镜头自动前移，字幕 / BGM 按新起点
+    重映射。这样用户不用等全部镜头齐了才能看第一个镜头的成片效果。
+    """
     project = session.get(Project, episode.project_id)
-    shots = _ordered_shots(session, episode.id)
-    video_track: list[dict[str, Any]] = []
-    cursor = 0
-    for index, shot in enumerate(s for s in shots if s.required):
-        # FR-061：转场表示「从上一镜切入本镜」的时长，会与上一镜重叠，
-        # 因此本镜起点前移，全片总时长相应缩短。音轨起点全部以本镜 start_ms 为基准，
-        # 所以音画在加入转场后依然对齐。
-        transition = _shot_transition(shot) if index > 0 else None
-        overlap = int(transition["duration_ms"]) if transition else 0
-        start = max(0, cursor - overlap)
-        entry: dict[str, Any] = {
-            "shot_id": shot.id,
-            "shot_no": shot.shot_no,
-            "start_ms": start,
-            "duration_ms": shot.duration_ms,
-            "end_ms": start + shot.duration_ms,
-            "kind": "video",
-            "media_id": None,
-            "skipped": False,
-            "transition": transition,
-            "transition_ms": overlap,
-        }
-        if shot.video_status == "CONFIRMED" and shot.video_media_id:
-            entry["media_id"] = shot.video_media_id
-        elif shot.confirmed_media_id:
-            entry["kind"] = "image"
-            entry["media_id"] = shot.confirmed_media_id
-        else:
-            entry["kind"] = "placeholder"
-        if shot.video_status == "SKIPPED":
-            entry["skipped"] = True
-            entry["kind"] = "image" if shot.confirmed_media_id else "placeholder"
-        video_track.append(entry)
-        cursor = entry["end_ms"]
+    shots = [s for s in _ordered_shots(session, episode.id) if s.required]
+
+    def _entries(shot_list: list[Shot], *, skip_unready: bool) -> list[dict[str, Any]]:
+        video_track: list[dict[str, Any]] = []
+        cursor = 0
+        placed = 0
+        for shot in shot_list:
+            # FR-061：转场表示「从上一镜切入本镜」的时长，会与上一镜重叠。
+            # 以「已入轨镜头数」判断是否首镜，避免跳过镜头后把转场算到错的位置。
+            transition = _shot_transition(shot) if placed > 0 else None
+            overlap = int(transition["duration_ms"]) if transition else 0
+            start = max(0, cursor - overlap)
+            entry: dict[str, Any] = {
+                "shot_id": shot.id,
+                "shot_no": shot.shot_no,
+                "start_ms": start,
+                "duration_ms": shot.duration_ms,
+                "end_ms": start + shot.duration_ms,
+                "kind": "video",
+                "media_id": None,
+                "skipped": False,
+                "transition": transition,
+                "transition_ms": overlap,
+            }
+            if shot.video_status == "CONFIRMED" and shot.video_media_id:
+                entry["media_id"] = shot.video_media_id
+            elif shot.confirmed_media_id:
+                entry["kind"] = "image"
+                entry["media_id"] = shot.confirmed_media_id
+            else:
+                entry["kind"] = "placeholder"
+            # 有「已生成但未确认」的候选视频时标记出来，预览退回静态图前先提醒用户
+            entry["has_candidate_video"] = bool(
+                shot.video_media_id and shot.video_status not in ("CONFIRMED", "SKIPPED")
+            )
+            if shot.video_status == "SKIPPED":
+                entry["skipped"] = True
+                entry["kind"] = "image" if shot.confirmed_media_id else "placeholder"
+            if skip_unready and not entry["media_id"]:
+                continue
+            video_track.append(entry)
+            cursor = entry["end_ms"]
+            placed += 1
+        return video_track
+
+    # 完整时间线（含未就绪镜头）只用来算字幕 / BGM 的「原始绝对起点」，
+    # 部分预览压缩时间线后要靠它做重映射。
+    full_track = _entries(shots, skip_unready=False)
+    video_track = _entries(shots, skip_unready=only_ready)
+
+    placed_ids = {entry["shot_id"] for entry in video_track}
+    shot_base = {entry["shot_id"]: entry["start_ms"] for entry in video_track}
+    old_base = {entry["shot_id"]: entry["start_ms"] for entry in full_track}
 
     dialogue: list[dict[str, Any]] = []
-    for track in session.scalars(
-        select(AudioTrack)
-        .where(AudioTrack.episode_id == episode.id, AudioTrack.kind == "dialogue")
-        .order_by(AudioTrack.start_ms)
-    ):
+    # 排序必须按「镜头顺序 → 台词序号」，不能只按 start_ms：
+    # 每镜的 track.start_ms 都是从 0 起算的，只按时间排会把不同镜头的台词交错在一起，
+    # 字幕序号（index_no）也就跟着乱。
+    dialogue_tracks = list(
+        session.scalars(
+            select(AudioTrack).where(
+                AudioTrack.episode_id == episode.id, AudioTrack.kind == "dialogue"
+            )
+        )
+    )
+    dialogue_tracks.sort(
+        key=lambda t: (
+            shot_base.get(t.shot_id, 0),
+            t.line_index if t.line_index is not None else 10**6,
+            t.start_ms,
+        )
+    )
+    for track in dialogue_tracks:
+        if only_ready and track.shot_id and track.shot_id not in placed_ids:
+            continue
         shot = session.get(Shot, track.shot_id) if track.shot_id else None
-        base = 0
-        if shot is not None:
-            for entry in video_track:
-                if entry["shot_id"] == shot.id:
-                    base = entry["start_ms"]
-                    break
+        base = shot_base.get(track.shot_id, 0) if track.shot_id else 0
         asset = session.get(MediaAsset, track.media_id) if track.media_id else None
         duration = (asset.duration_ms if asset and asset.duration_ms else (track.end_ms - track.start_ms))
         dialogue.append(
@@ -268,13 +309,21 @@ def build_timeline(session: Session, episode: Episode) -> dict[str, Any]:
             AudioTrack.episode_id == episode.id, AudioTrack.kind.in_(["bgm", "ambience", "sfx"])
         )
     ):
+        if only_ready:
+            # 部分预览：整集垫乐（shot_id=None）不属于任何镜头，跳过；
+            # 镜头垫乐只在它覆盖的镜头被选中时保留。
+            if not track.shot_id or track.shot_id not in placed_ids:
+                continue
+        shift = 0
+        if only_ready and track.shot_id in old_base and track.shot_id in shot_base:
+            shift = shot_base[track.shot_id] - old_base[track.shot_id]
         bgm.append(
             {
                 "track_id": track.id,
                 "kind": track.kind,
                 "media_id": track.media_id,
-                "start_ms": track.start_ms,
-                "end_ms": track.end_ms,
+                "start_ms": track.start_ms + shift,
+                "end_ms": track.end_ms + shift,
                 "volume_db": track.volume_db,
                 "fade_in_ms": track.fade_in_ms,
                 "fade_out_ms": track.fade_out_ms,
@@ -282,21 +331,31 @@ def build_timeline(session: Session, episode: Episode) -> dict[str, Any]:
             }
         )
 
-    subtitles = [
-        {
-            "index": cue.index_no,
-            "start_ms": cue.start_ms,
-            "end_ms": cue.end_ms,
-            "text": cue.text,
-            "speaker": cue.speaker,
-            "edited": cue.edited,
-        }
-        for cue in session.scalars(
-            select(SubtitleCue)
-            .where(SubtitleCue.episode_id == episode.id)
-            .order_by(SubtitleCue.index_no)
+    subtitles: list[dict[str, Any]] = []
+    for cue in session.scalars(
+        select(SubtitleCue)
+        .where(SubtitleCue.episode_id == episode.id)
+        .order_by(SubtitleCue.index_no)
+    ):
+        if only_ready and cue.shot_id and cue.shot_id not in placed_ids:
+            continue
+        start_ms = cue.start_ms
+        end_ms = cue.end_ms
+        if only_ready and cue.shot_id in old_base and cue.shot_id in shot_base:
+            shift = shot_base[cue.shot_id] - old_base[cue.shot_id]
+            start_ms += shift
+            end_ms += shift
+        subtitles.append(
+            {
+                "index": cue.index_no,
+                "shot_id": cue.shot_id,
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+                "text": cue.text,
+                "speaker": cue.speaker,
+                "edited": cue.edited,
+            }
         )
-    ]
 
     # FR-060/FR-063：时间线尺寸跟随项目画幅比例，不再写死竖屏 720×1280
     width, height = resolution_for(project.aspect_ratio if project else None, "720p")
@@ -306,7 +365,7 @@ def build_timeline(session: Session, episode: Episode) -> dict[str, Any]:
         "aspect_ratio": project.aspect_ratio if project else "9:16",
         "width": width,
         "height": height,
-        "total_duration_ms": cursor,
+        "total_duration_ms": video_track[-1]["end_ms"] if video_track else 0,
         "target_duration_ms": episode.target_duration_ms,
         "tracks": {
             "video": video_track,
@@ -317,14 +376,20 @@ def build_timeline(session: Session, episode: Episode) -> dict[str, Any]:
     }
 
 
-def validate_timeline(session: Session, episode: Episode) -> dict[str, Any]:
-    """合成前校验，错误可定位到镜号与音轨（FR-MVP-060）。"""
-    timeline = build_timeline(session, episode)
+def validate_timeline(
+    session: Session, episode: Episode, *, only_ready: bool = False
+) -> dict[str, Any]:
+    """合成前校验，错误可定位到镜号与音轨（FR-MVP-060）。
+
+    `only_ready=True` 只校验「已就绪」的那部分镜头：未就绪镜头直接从时间线
+    剔除，对应的「缺画面 / 缺台词音频」就不再是错误——用于部分预览先看效果。
+    """
+    timeline = build_timeline(session, episode, only_ready=only_ready)
     errors: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
 
     if not timeline["tracks"]["video"]:
-        errors.append({"code": "NO_SHOTS", "message": "时间线为空，没有可合成的分镜", "shot_no": None, "track": "video"})
+        errors.append({"code": "NO_SHOTS", "message": "没有可合成的镜头（部分预览需至少一个镜头已就绪）", "shot_no": None, "track": "video"})
 
     # FR-060：镜头顺序校验。镜号必须唯一且为正，否则「镜 N」定位会指到两个镜头。
     all_shots = _ordered_shots(session, episode.id)
@@ -387,10 +452,19 @@ def validate_timeline(session: Session, episode: Episode) -> dict[str, Any]:
                 "message": f"镜 {entry['shot_no']} 既无确认画面也无视频，无法合成", "track": "video",
             })
         elif entry["kind"] == "image":
-            warnings.append({
-                "code": "STATIC_IMAGE", "shot_no": entry["shot_no"],
-                "message": f"镜 {entry['shot_no']} 使用静态图（未生成视频或已跳过）", "track": "video",
-            })
+            if entry.get("has_candidate_video"):
+                warnings.append({
+                    "code": "UNCONFIRMED_VIDEO", "shot_no": entry["shot_no"],
+                    "message": (
+                        f"镜 {entry['shot_no']} 有已生成但未确认的视频，预览暂时用静态图；"
+                        "确认视频后预览会是动态画面"
+                    ), "track": "video",
+                })
+            else:
+                warnings.append({
+                    "code": "STATIC_IMAGE", "shot_no": entry["shot_no"],
+                    "message": f"镜 {entry['shot_no']} 使用静态图（未生成视频或已跳过）", "track": "video",
+                })
         if entry["media_id"]:
             asset = session.get(MediaAsset, entry["media_id"])
             if asset is None or asset.status == AssetStatus.REJECTED.value:
@@ -543,12 +617,27 @@ def generate_subtitles(session: Session, episode: Episode) -> list[SubtitleCue]:
     重新生成字幕即可拿到精确时间。
     """
     timeline = build_timeline(session, episode)
-    session.execute(delete(SubtitleCue).where(SubtitleCue.episode_id == episode.id))
+    # FR-053：人工校正过的镜头不能被「重新生成」冲掉。
+    # 做法：这些镜头的字幕原样保留，其余镜头照常重建；最后统一按时间重排序号。
+    existing = list(
+        session.scalars(select(SubtitleCue).where(SubtitleCue.episode_id == episode.id))
+    )
+    edited_shots = {cue.shot_id for cue in existing if cue.edited and cue.shot_id}
+    kept = [cue for cue in existing if cue.edited and cue.shot_id in edited_shots]
+    session.execute(
+        delete(SubtitleCue).where(
+            SubtitleCue.episode_id == episode.id,
+            SubtitleCue.shot_id.notin_(edited_shots) if edited_shots else True,
+        )
+    )
     session.flush()
-    cues: list[SubtitleCue] = []
+    cues: list[SubtitleCue] = list(kept)
     index = 1
     for entry in timeline["tracks"]["dialogue"]:
         if not entry["text"]:
+            continue
+        if entry["shot_id"] in edited_shots:
+            # 该镜有手工校正，保留用户版本，不再追加自动生成的一条
             continue
         speaker = ""
         if entry["character_id"]:
@@ -634,7 +723,19 @@ def generate_subtitles(session: Session, episode: Episode) -> list[SubtitleCue]:
         )
 
     session.flush()
-    return cues
+    # 保留的人工字幕与新生成的字幕混在一起：索引按时间重排，
+    # 否则 SRT 会出现「第 3 条排在 1ms、第 1 条排在 5s」这种倒序。
+    ordered = list(
+        session.scalars(
+            select(SubtitleCue)
+            .where(SubtitleCue.episode_id == episode.id)
+            .order_by(SubtitleCue.start_ms, SubtitleCue.index_no)
+        )
+    )
+    for position, cue in enumerate(ordered, start=1):
+        cue.index_no = position
+    session.flush()
+    return ordered
 
 
 def format_timestamp(ms: int, *, vtt: bool = False) -> str:

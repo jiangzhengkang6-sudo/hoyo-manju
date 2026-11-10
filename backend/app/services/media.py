@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import datetime as dt
 import mimetypes
+import re
+import secrets
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.errors import NotFound, StorageError
+from app.core.errors import NotFound, StorageConflict, StorageError
 from app.core.security import new_id, sha256_of
 from app.db.models import AssetStatus, MediaAsset
 from app.services import events, safety
@@ -96,14 +99,31 @@ def save_media(
     check = quality_check(kind=kind, content=content, width=width, height=height, mime_type=mime_type)
     safety_result = safety.check_media_metadata(kind, metadata)
 
-    key = build_key(project_id or "shared", episode_id or "misc", kind, filename=filename)
-    try:
-        get_storage().put(key, content, mime_type)
-    except StorageError:
-        raise
+    # 供应商产物的文件名是「每批重新计数」的（gemini_1.png / gemini_2.png），
+    # 直接拿它当 key 会让下一批生成覆盖上一批的文件 —— 表现为「之前生成的图不见了」
+    # 甚至「主角立绘变成了另一个角色」，而数据库里还留着一条指向该路径的记录。
+    # 因此：key 里带随机后缀，且**撞名就换名字重试**，绝不覆盖已有对象。
+    media_id = new_id("med")
+    stem, dot, ext = filename.rpartition(".")
+    storage = get_storage()
+    key = ""
+    for _ in range(5):
+        token = secrets.token_hex(4)
+        stored_name = f"{stem}_{token}.{ext}" if dot and stem else f"{filename}_{token}"
+        candidate = build_key(
+            project_id or "shared", episode_id or "misc", kind, filename=stored_name
+        )
+        try:
+            storage.put(candidate, content, mime_type)
+        except StorageConflict:
+            continue
+        key = candidate
+        break
+    if not key:
+        raise StorageError("无法分配唯一的存储键：连续 5 次撞名，请检查存储目录")
 
     asset = MediaAsset(
-        id=new_id("med"),
+        id=media_id,
         project_id=project_id,
         episode_id=episode_id,
         owner_type=owner_type,
@@ -177,6 +197,44 @@ def get_media(session: Session, media_id: str) -> MediaAsset:
     return asset
 
 
+#: ffmpeg 打印的时长：`Duration: 00:00:04.00`
+_DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
+
+
+def probe_duration_ms(asset: MediaAsset) -> int | None:
+    """读视频/音频时长（毫秒）。
+
+    合成按分镜时长裁剪，不依赖这个值；但展示与「时长对不上」的提醒需要它。
+    远端存储没有本地文件时直接返回 None——不要为了读时长去把整个文件拉下来。
+    """
+    try:
+        path = local_path(asset)
+    except Exception:  # noqa: BLE001 - 远端存储无本地路径
+        return None
+    if path is None or not Path(path).exists():
+        return None
+    try:
+        from app.services.audio_fx import ffmpeg_bin
+
+        binary = ffmpeg_bin()
+        if not binary:
+            return None
+        proc = subprocess.run(  # noqa: S603 - 固定可执行文件、参数来自本地路径
+            [binary, "-i", str(path)],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = _DURATION_RE.search(proc.stderr or "")
+    if not match:
+        return None
+    hours, minutes, seconds = match.groups()
+    return int((int(hours) * 3600 + int(minutes) * 60 + float(seconds)) * 1000)
+
+
 def clamp_ttl(ttl_seconds: int | None) -> int:
     """§11.1-2：签名 URL 有效期默认不超过 30 分钟，且服务端强制上限。
 
@@ -223,6 +281,18 @@ def exists(session: Session, asset: MediaAsset | None) -> bool:
     return Path(path).exists()
 
 
+def _utc_iso(value: dt.datetime | None) -> str | None:
+    """统一输出带时区的 ISO 时间串。
+
+    库里存的是 naive UTC；直接 `isoformat()` 交给浏览器会被当本地时间解析，
+    北京时间会平白少 8 小时。这个字段还会被塞进任务结果（JSON 列），
+    必须是字符串，否则 commit 直接报「datetime 不能序列化」。
+    """
+    if value is None:
+        return None
+    return (value if value.tzinfo else value.replace(tzinfo=dt.timezone.utc)).isoformat()
+
+
 def to_dict(asset: MediaAsset, *, with_url: bool = True) -> dict[str, Any]:
     meta = dict(asset.metadata_json or {})
     data = {
@@ -262,7 +332,7 @@ def to_dict(asset: MediaAsset, *, with_url: bool = True) -> dict[str, Any]:
         "rights_note": asset.rights_note,
         "source": asset.source,
         "metadata_json": asset.metadata_json,
-        "created_at": asset.created_at,
+        "created_at": _utc_iso(asset.created_at),
         "aigc": safety.aigc_label(),
     }
     if with_url:
@@ -280,6 +350,7 @@ def list_media(
     role: str | None = None,
     owner_id: str | None = None,
     limit: int = 200,
+    include_rejected: bool = True,
 ) -> list[MediaAsset]:
     stmt = select(MediaAsset).order_by(MediaAsset.created_at.desc()).limit(limit)
     for field, value in (
@@ -291,6 +362,9 @@ def list_media(
     ):
         if value:
             stmt = stmt.where(getattr(MediaAsset, field) == value)
+    if not include_rejected:
+        # UI 列表不该出现已驳回/历史损坏的素材（它们的文件可能已被别人覆盖）
+        stmt = stmt.where(MediaAsset.status != AssetStatus.REJECTED.value)
     return list(session.scalars(stmt))
 
 

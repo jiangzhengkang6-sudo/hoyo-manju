@@ -39,6 +39,7 @@ const props = withDefaults(
 
 const failed = ref(false)
 const zoomed = ref(false)
+const playing = ref(false)
 const downloading = ref(false)
 
 const src = computed(() => props.url || (props.mediaId ? mediaApi.contentUrl(props.mediaId) : null))
@@ -61,8 +62,23 @@ function closeZoom(): void {
   if (typeof window !== 'undefined') window.removeEventListener('keydown', onKey)
 }
 
+/** 视频在列表里只放一个播放按钮，真正观看走弹层（96px 宽的行内播放器没法看）。 */
+function openPlayer(): void {
+  if (!src.value) return
+  playing.value = true
+  if (typeof window !== 'undefined') window.addEventListener('keydown', onKey)
+}
+
+function closePlayer(): void {
+  playing.value = false
+  if (typeof window !== 'undefined') window.removeEventListener('keydown', onKey)
+}
+
 function onKey(event: KeyboardEvent): void {
-  if (event.key === 'Escape') closeZoom()
+  if (event.key === 'Escape') {
+    closeZoom()
+    closePlayer()
+  }
 }
 
 /**
@@ -94,9 +110,21 @@ watch(
 </script>
 
 <template>
-  <div class="thumb" :class="{ portrait }">
+  <div class="thumb" :class="{ portrait, 'has-video': kind === 'video' }">
     <template v-if="src && !failed">
-      <video v-if="kind === 'video'" :src="src" controls preload="metadata" />
+      <template v-if="kind === 'video'">
+        <video
+          class="thumb-video"
+          :src="src"
+          preload="metadata"
+          muted
+          playsinline
+          @error="failed = true"
+        />
+        <button type="button" class="thumb-play" title="播放" @click.stop="openPlayer">
+          ▶ 播放
+        </button>
+      </template>
       <audio v-else-if="kind === 'audio'" :src="src" controls />
       <img
         v-else
@@ -144,6 +172,17 @@ watch(
         <img :src="src ?? ''" :alt="alt" @click.stop />
         <button type="button" class="lightbox-close" title="关闭（Esc）" @click="closeZoom">×</button>
       </div>
+      <!-- 视频弹层：列表里的缩略图太小，真正观看在这里 -->
+      <div
+        v-if="playing"
+        class="lightbox video-lightbox"
+        role="dialog"
+        aria-modal="true"
+        @click="closePlayer"
+      >
+        <video :src="src ?? ''" controls autoplay playsinline @click.stop />
+        <button type="button" class="lightbox-close" title="关闭（Esc）" @click="closePlayer">×</button>
+      </div>
     </Teleport>
   </div>
 </template>
@@ -161,6 +200,40 @@ watch(
 }
 .thumb.portrait {
   aspect-ratio: 9 / 16;
+}
+/* 视频缩略图：给个固定画幅，避免被列表行高拉成长条 */
+.thumb.has-video {
+  aspect-ratio: 16 / 9;
+}
+.thumb.has-video.portrait {
+  aspect-ratio: 9 / 16;
+}
+.thumb-video {
+  object-fit: contain !important;
+  background: #000;
+}
+.thumb-play {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: fit-content;
+  height: fit-content;
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-pill);
+  border: 1px solid rgba(243, 237, 227, 0.35);
+  background: rgba(6, 5, 4, 0.72);
+  color: #fff;
+  font-size: var(--fs-12);
+  cursor: pointer;
+}
+.thumb-play:hover {
+  border-color: var(--accent-2);
+}
+.video-lightbox video {
+  max-width: 92vw;
+  max-height: 86vh;
+  border-radius: var(--radius);
+  background: #000;
 }
 .thumb img,
 .thumb video {
@@ -185,22 +258,22 @@ watch(
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 5px;
+  gap: var(--space-2);
   color: var(--text-3);
-  padding: 12px;
+  padding: var(--space-3);
 }
 .thumb-icon {
-  font-size: 18px;
+  font-size: var(--fs-19);
 }
 .thumb-note {
-  font-size: 11px;
+  font-size: var(--fs-11);
 }
 .thumb-actions {
   position: absolute;
   right: 5px;
   bottom: 5px;
   display: flex;
-  gap: 4px;
+  gap: var(--space-1);
   opacity: 0;
   transition: opacity var(--dur, 0.15s) var(--ease, ease);
 }
@@ -217,7 +290,7 @@ watch(
   border-radius: var(--radius-xs, 4px);
   background: rgba(0, 0, 0, 0.62);
   color: #fff;
-  font-size: 13px;
+  font-size: var(--fs-13);
   line-height: 1;
   cursor: pointer;
 }
@@ -251,11 +324,11 @@ watch(
   right: 20px;
   width: 34px;
   height: 34px;
-  border: 1px solid rgba(255, 255, 255, 0.35);
+  border: 1px solid rgba(243, 237, 227, 0.35);
   border-radius: 50%;
   background: rgba(0, 0, 0, 0.5);
   color: #fff;
-  font-size: 20px;
+  font-size: var(--fs-19);
   line-height: 1;
   cursor: pointer;
 }

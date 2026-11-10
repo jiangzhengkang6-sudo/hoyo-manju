@@ -156,7 +156,7 @@ async function runSafetyCheck(): Promise<void> {
       <div>
         <h1 class="title-xl">设置</h1>
         <p class="muted small">
-          供应商密钥、配额与限制。所有限制值均来自后端 <span class="mono">/config/limits</span>，前端不写死。
+          供应商密钥、配额与限制。所有限制值以后端配置为准，前端不写死。
         </p>
       </div>
       <div class="row-wrap">
@@ -168,7 +168,7 @@ async function runSafetyCheck(): Promise<void> {
     </header>
 
     <div class="stat-row">
-      <StatTile label="并发上限" :value="limits.max_concurrent_jobs ?? '—'" hint="来自 /config/limits" />
+      <StatTile label="并发上限" :value="limits.max_concurrent_jobs ?? '—'" hint="后台配置" />
       <StatTile label="运行中任务" :value="quota?.running_jobs ?? '—'" />
       <StatTile label="剩余配额" :value="quota ? formatCents(quota.remaining_cents) : '—'" tone="accent" />
       <StatTile label="价格版本" :value="pricingVersion ?? '—'" />
@@ -317,7 +317,7 @@ async function runSafetyCheck(): Promise<void> {
       </div>
     </section>
 
-    <div class="two-col">
+    <div class="two-col two-col--even">
       <section class="card">
         <div class="card-head">
           <h2 class="title-md">配额</h2>
@@ -331,7 +331,7 @@ async function runSafetyCheck(): Promise<void> {
       <section class="card">
         <div class="card-head">
           <h2 class="title-md">限制项（只读）</h2>
-          <span class="tiny dim mono">/config/limits</span>
+          <span class="tiny dim">只读 · 后台配置</span>
         </div>
         <div class="card-body">
           <dl class="kv">
@@ -344,7 +344,7 @@ async function runSafetyCheck(): Promise<void> {
       </section>
     </div>
 
-    <div class="two-col">
+    <div class="two-col two-col--even">
       <section class="card">
         <div class="card-head">
           <h2 class="title-md">价格表</h2>
@@ -389,7 +389,7 @@ async function runSafetyCheck(): Promise<void> {
             {{ safetyBusy ? '检查中…' : '检查文本' }}
           </button>
         </div>
-        <div class="card-body col" style="gap: 12px">
+        <div class="card-body col" style="gap: var(--space-3)">
           <div class="field">
             <label class="label" for="safe-text">待检查文本</label>
             <textarea
@@ -426,24 +426,6 @@ async function runSafetyCheck(): Promise<void> {
 </template>
 
 <style scoped>
-.page {
-  padding: 24px;
-  display: flex;
-  flex-direction: column;
-  gap: var(--gap-lg);
-  max-width: 1500px;
-}
-.page-head {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 16px;
-  flex-wrap: wrap;
-}
-.page-head p {
-  margin-top: 4px;
-  max-width: 660px;
-}
 .stat-row {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -458,7 +440,7 @@ async function runSafetyCheck(): Promise<void> {
 .fallback-block {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-3);
   margin-top: 4px;
   padding-top: 12px;
   border-top: 1px dashed var(--line);
@@ -466,37 +448,26 @@ async function runSafetyCheck(): Promise<void> {
 .provider-slot {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 14px;
+  gap: var(--space-3);
+  padding: var(--space-4);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--panel-2);
 }
-.two-col {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--gap);
-  align-items: start;
-}
-@media (max-width: 1120px) {
-  .two-col {
-    grid-template-columns: 1fr;
-  }
-}
 .safety-result {
   border-radius: var(--radius-sm);
-  padding: 10px 12px;
+  padding: var(--space-3) var(--space-3);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
   border: 1px solid var(--line);
 }
 .safety-result.ok {
-  border-color: rgba(52, 211, 153, 0.35);
+  border-color: rgba(111, 191, 147, 0.35);
   background: var(--ok-soft);
 }
 .safety-result.bad {
-  border-color: rgba(248, 113, 113, 0.35);
+  border-color: rgba(224, 122, 106, 0.35);
   background: var(--danger-soft);
 }
 .safety-list {
@@ -504,7 +475,7 @@ async function runSafetyCheck(): Promise<void> {
   padding-left: 18px;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: var(--space-1);
   color: var(--text-1);
 }
 </style>

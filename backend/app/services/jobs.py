@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import datetime as dt
-from typing import Any, Literal
+from enum import Enum
+from typing import Any, Callable, Literal
 
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
@@ -159,6 +160,30 @@ def list_jobs(
     return {"items": rows, "total": total, "page": page, "page_size": page_size}
 
 
+def jsonable(value: Any) -> Any:
+    """把任务结果转成能写进 JSON 列的形式。
+
+    任务结果里常带 `media_service.to_dict()` 这类结构，里面有 datetime。
+    直接塞 `result_ref` 会让 commit 抛「Object of type datetime is not
+    JSON serializable」，而那次 commit 同时也带着「任务已完成」的状态——
+    事务一失败，产物已经落库、任务却永远停在 RUNNING 100%（实测踩过）。
+    所以在入口统一收口，不让调用方各自记得转字符串。
+    """
+    if isinstance(value, dict):
+        return {str(k): jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [jsonable(v) for v in value]
+    if isinstance(value, dt.datetime):
+        return (
+            value if value.tzinfo else value.replace(tzinfo=dt.timezone.utc)
+        ).isoformat()
+    if isinstance(value, dt.date):
+        return value.isoformat()
+    if isinstance(value, Enum):
+        return value.value
+    return value
+
+
 def set_status(
     session: Session,
     job: Job,
@@ -175,13 +200,13 @@ def set_status(
     if progress is not None:
         job.progress = max(0, min(100, progress))
     if result_ref is not None:
-        job.result_ref = result_ref
+        job.result_ref = jsonable(result_ref)
     if error_code:
         job.error_code = error_code
     if error_message:
         job.error_message = error_message
     if error_detail is not None:
-        job.error_detail = error_detail
+        job.error_detail = jsonable(error_detail)
     if status == JobStatus.RUNNING.value and job.started_at is None:
         job.started_at = _now()
     if status in TERMINAL_JOB_STATUSES:
@@ -309,7 +334,12 @@ def schedule_auto_retry(
     delay = (
         int(delay_seconds)
         if delay_seconds is not None
-        else settings.retry_backoff_seconds * int(job.attempt or 1)
+        else min(
+            # 指数退避：网络/供应商抖动通常几秒内恢复，线性 5 秒会让重试全撞在
+            # 同一个窗口里。上限 60 秒，避免用户干等。
+            settings.retry_backoff_seconds * (2 ** max(int(job.attempt or 1) - 1, 0)),
+            60,
+        )
     )
     job.status = JobStatus.RETRYING.value
     job.attempt = int(job.attempt or 1) + 1
@@ -412,9 +442,16 @@ def retry_job(session: Session, job: Job, *, reason: str = "") -> Job:
     )
     session.add(new_job)
     session.flush()
-    if job.cost_reserved_cents:
-        cost_service.reserve(session, job=new_job, cents=job.cost_reserved_cents,
-                             stage=new_job.stage, note=f"重试预留（原任务 {job.id}）")
+    # 预留「转移」而不是「复制」：先把原任务未结清的预留释放掉，再挂到新任务上。
+    # 只复制不释放会让同一笔钱被算两次；而按台账取数才拿得到真实未结金额
+    # （`job.cost_reserved_cents` 可能是别的会话留下的旧值）。
+    outstanding = cost_service.outstanding_reserved(session, job.id)
+    if outstanding:
+        cost_service.release(session, job=job, reason=f"重试转出预留（→ {new_job.id}）")
+        cost_service.reserve(
+            session, job=new_job, cents=outstanding, stage=new_job.stage,
+            note=f"重试转入预留（原任务 {job.id}）", enforce=False,
+        )
     events.publish(
         session,
         events.JOB_CREATED,
@@ -432,6 +469,29 @@ def retry_job(session: Session, job: Job, *, reason: str = "") -> Job:
     return new_job
 
 
+def cancel_probe(job_id: str) -> Callable[[], bool]:
+    """返回一个「该任务是否已被要求取消」的探针，供批处理循环逐个检查。
+
+    用**独立 session** 读：主 session 正持有写事务，若在这里 `expire_all()`
+    会把循环中刚改的分镜状态/已生成素材全部丢掉。
+    读失败按「未取消」处理——宁可不中断，也不要因为一次探测异常毁掉任务。
+    """
+
+    def _cancelled() -> bool:
+        from app.db.session import session_scope
+
+        try:
+            with session_scope() as probe:
+                row = probe.get(Job, job_id)
+                return bool(
+                    row and (row.cancel_requested or row.status == JobStatus.CANCELLING.value)
+                )
+        except Exception:  # noqa: BLE001 - 探测失败不应影响主流程
+            return False
+
+    return _cancelled
+
+
 def cancel_job(session: Session, job: Job) -> dict[str, Any]:
     if job.status in TERMINAL_JOB_STATUSES:
         raise StateConflict(f"任务已处于终态，无法取消：{job.status}")
@@ -444,13 +504,18 @@ def cancel_job(session: Session, job: Job) -> dict[str, Any]:
             "released_cents": released,
             "note": "排队任务已取消，配额已释放。" if released else "排队任务已取消。",
         }
-    if job.status == JobStatus.RUNNING.value:
+    if job.status in (JobStatus.RUNNING.value, JobStatus.CANCELLING.value):
+        if job.type not in CANCELABLE_JOB_TYPES:
+            raise StateConflict(
+                f"该任务已开始执行，暂不支持中途停止（{job.type}）；请等待本次完成"
+            )
+        # 幂等：重复点取消不该报错，前端可能连点
         job.cancel_requested = True
         set_status(session, job, JobStatus.CANCELLING.value)
         return {
             "status": job.status,
             "released_cents": 0,
-            "note": "已停止等待，但供应商可能仍在计费；任务将在下一个检查点停止。",
+            "note": "已请求停止：正在生成的这一张/一条会先跑完（费用照常结算），之后不再继续。",
         }
     raise StateConflict(f"当前状态不可取消：{job.status}")
 
@@ -459,6 +524,13 @@ def is_cancel_requested(session: Session, job_id: str) -> bool:
     session.expire_all()
     job = session.get(Job, job_id)
     return bool(job and (job.cancel_requested or job.status == JobStatus.CANCELLING.value))
+
+
+#: 支持「中途停止」的任务类型：批处理循环里逐个检查取消信号。
+#: 其它类型（渲染/剧本）是一次性长调用，取消按钮只会骗人，直接不暴露。
+CANCELABLE_JOB_TYPES = frozenset(
+    {"IMAGE_GENERATION", "VIDEO_GENERATION", "CHARACTER_ASSET_GENERATION"}
+)
 
 
 def to_dict(job: Job) -> dict[str, Any]:
@@ -487,6 +559,10 @@ def to_dict(job: Job) -> dict[str, Any]:
         "parent_job_id": job.parent_job_id,
         "result_ref": job.result_ref,
         "cancel_requested": job.cancel_requested,
+        #: 前端据此决定是否显示「停止生成」——避免给不支持协作取消的任务放假按钮
+        "cancelable": (
+            job.type in CANCELABLE_JOB_TYPES and job.status not in TERMINAL_JOB_STATUSES
+        ),
         "created_at": job.created_at,
         "started_at": job.started_at,
         "finished_at": job.finished_at,

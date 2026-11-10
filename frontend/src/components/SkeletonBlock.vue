@@ -36,7 +36,7 @@ withDefaults(
 .skeleton-lines {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-3);
 }
 .skeleton-cards {
   display: grid;

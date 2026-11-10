@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /** 配额仪表：额度 / 已用 / 冻结 / 剩余 + 并发占用。数值全部来自 `GET /quota`。 */
 import { computed } from 'vue'
-import { formatCents } from '@/api/cost'
+import { formatCents, formatCredits } from '@/api/cost'
 import { percent } from '@/utils/format'
 import SkeletonBlock from './SkeletonBlock.vue'
 import type { Quota } from '@/types'
@@ -41,7 +41,7 @@ const concurrentPercent = computed(() => {
       <div class="row-between">
         <span class="section-title">成本配额</span>
         <span class="mono tiny" :class="barTone === 'danger' ? 'qm-danger' : 'dim'">
-          {{ formatCents(quota.remaining_cents) }} 可用
+          {{ formatCredits(quota.remaining_credits) }} 可用
         </span>
       </div>
 
@@ -50,11 +50,14 @@ const concurrentPercent = computed(() => {
       </div>
 
       <div class="qm-grid mono tiny">
-        <span>额度 {{ formatCents(quota.limit_cents) }}</span>
-        <span>已用 {{ formatCents(quota.used_cents) }}</span>
-        <span v-if="quota.reserved_cents">冻结 {{ formatCents(quota.reserved_cents) }}</span>
+        <span>额度 {{ formatCredits(quota.limit_credits) }}</span>
+        <span>已用 {{ formatCredits(quota.used_credits) }}</span>
+        <span v-if="quota.reserved_credits">冻结 {{ formatCredits(quota.reserved_credits) }}</span>
         <span>占用 {{ usedPercent.toFixed(1) }}%</span>
       </div>
+      <span class="qm-note tiny dim-2">
+        按供应商积分口径 · {{ formatCents(quota.remaining_cents) }} 可用
+      </span>
 
       <div v-if="!compact" class="qm-concurrent">
         <div class="row-between tiny dim">
@@ -78,15 +81,15 @@ const concurrentPercent = computed(() => {
 .quota-meter {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
 }
 .quota-meter.compact {
-  gap: 6px;
+  gap: var(--space-2);
 }
 .qm-grid {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 12px;
+  gap: var(--space-1) 12px;
   color: var(--text-2);
 }
 .qm-danger {
@@ -95,7 +98,7 @@ const concurrentPercent = computed(() => {
 .qm-concurrent {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: var(--space-2);
   margin-top: 2px;
 }
 </style>

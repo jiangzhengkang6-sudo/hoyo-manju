@@ -164,6 +164,15 @@ class StorageError(AppError):
     code = ErrorCode.STORAGE_ERROR
 
 
+class StorageConflict(StorageError):
+    """目标键已存在（拒绝覆盖）。
+
+    媒体素材必须「一次写入、永不覆盖」：同名覆盖会让旧记录指向别人的图，
+    表现为「角色立绘被换成了另一个角色」。命中这里说明调用方的 key 不唯一，
+    应当换一个 key 重试，而不是踩过去。
+    """
+
+
 class RenderError(AppError):
     status_code = 500
     code = ErrorCode.RENDER_ERROR

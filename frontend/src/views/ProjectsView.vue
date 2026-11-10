@@ -115,7 +115,7 @@ onMounted(async () => {
     <div class="stat-row">
       <StatTile label="进行中项目" :value="activeProjects.length" tone="accent" />
       <StatTile label="已归档" :value="archivedProjects.length" />
-      <StatTile label="项目总成本" :value="formatCents(totalCost)" hint="来自各项目 /cost 汇总字段" />
+      <StatTile label="项目总成本" :value="formatCents(totalCost)" hint="本工作区累计" />
       <StatTile
         label="配额可用"
         :value="config.quota ? formatCents(config.quota.remaining_cents) : '—'"
@@ -191,7 +191,7 @@ onMounted(async () => {
           <select id="p-ratio" v-model="form.aspect_ratio" class="select">
             <option v-for="ratio in config.aspectRatios" :key="ratio" :value="ratio">{{ ratio }}</option>
           </select>
-          <span class="hint">候选来自 /config/limits.aspect_ratios</span>
+          <span class="hint">可选项由后台配置下发</span>
         </div>
         <div class="field">
           <label class="label" for="p-lang">默认语言</label>
@@ -214,44 +214,26 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.page {
-  padding: 24px;
-  display: flex;
-  flex-direction: column;
-  gap: var(--gap-lg);
-  max-width: 1400px;
-}
-.page-head {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 16px;
-  flex-wrap: wrap;
-}
-.page-head p {
-  margin-top: 4px;
-  max-width: 620px;
-}
 .stat-row {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: var(--gap);
 }
 .project-card {
-  padding: 16px;
+  padding: var(--space-4);
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-3);
   cursor: pointer;
 }
 .pc-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-2);
 }
 .pc-name {
-  font-size: 16px;
+  font-size: var(--fs-16);
   font-weight: 650;
   letter-spacing: 0.01em;
   margin: 0;
@@ -262,18 +244,18 @@ onMounted(async () => {
 }
 .pc-foot {
   display: flex;
-  gap: 18px;
+  gap: var(--space-5);
   padding-top: 10px;
   border-top: 1px solid var(--line);
 }
 .pc-stat {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: var(--space-1);
 }
 .form-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 12px;
+  gap: var(--space-3);
 }
 </style>

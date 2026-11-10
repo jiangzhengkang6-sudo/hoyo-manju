@@ -420,6 +420,22 @@ class MockTextProvider(BaseProvider):
                 "camera_movement": meta.get("camera_movement", "固定"),
                 "composition": meta.get("composition", "中景"),
             }
+        elif task == "shot_suggest":
+            # 单镜「按大纲生成」草稿：给出结构完整、可直接编辑的一条
+            base_prompt = meta.get("image_prompt", "")
+            data = {
+                "action": f"{meta.get('action') or '人物停在原地'}，光影收紧，情绪更沉",
+                "dialogue": [],
+                "narration": "",
+                "composition": meta.get("composition") or "中景",
+                "camera_movement": meta.get("camera_movement") or "固定",
+                "duration_ms": 4000,
+                "characters": [],
+                "image_prompt": (
+                    f"{base_prompt}，电影感光影，浅景深" if base_prompt else "竖屏 9:16，电影感光影"
+                ),
+                "negative_prompt": "低清，畸形手指",
+            }
         elif task == "story_analysis":
             data = {
                 "theme": meta.get("theme", "选择与代价"),
@@ -630,7 +646,9 @@ class MockSpeechProvider(BaseProvider):
                 retryable=True,
             )
         await asyncio.sleep(0)
-        duration_ms = self.duration_for(request.text, request.speed)
+        # 语速统一由 `audio_fx.adjust_speed`（atempo）处理；这里按原速生成，
+        # 否则会「供应商先变一次 + 本地再变一次」，时长被算两遍。
+        duration_ms = self.duration_for(request.text)
         seconds = duration_ms / 1000.0
         base = 150 + (abs(hash(request.voice_id or "default")) % 120)
         out = Path(settings.data_dir) / "tmp"

@@ -128,6 +128,8 @@ export interface Project {
   default_language?: string | null
   style?: string | null
   default_style_id?: string | null
+  /** 统一语速：新角色/剧本同步角色的初始语速（FR-051） */
+  default_voice_speed?: number
   archived?: boolean
   archived_at?: string | null
   created_at?: string
@@ -145,7 +147,7 @@ export interface ProjectCreateInput {
   style?: string
 }
 
-export type ProjectPatch = Partial<ProjectCreateInput>
+export type ProjectPatch = Partial<ProjectCreateInput> & { default_voice_speed?: number }
 
 export interface CostBucket {
   stage?: string
@@ -176,6 +178,13 @@ export interface Quota {
   used_cents: number
   reserved_cents: number
   remaining_cents: number
+  /** 供应商口径（ToAPIs 积分）：1 积分 = $0.005，按汇率折算后约 3.6 分 */
+  limit_credits?: number
+  used_credits?: number
+  reserved_credits?: number
+  remaining_credits?: number
+  /** 1 积分折合多少分（人民币），换算依据 */
+  cents_per_credit?: number
   concurrent_limit: number
   running_jobs: number
 }
@@ -482,6 +491,8 @@ export type CharacterAssetKind = 'setting' | 'front' | 'half_body' | 'expression
 export interface Character {
   id: string
   project_id?: string
+  /** 归属剧集；为空表示项目级公共角色（所有剧集可见）。 */
+  episode_id?: string | null
   name: string
   identity?: string
   age_range?: string
@@ -499,6 +510,15 @@ export interface Character {
   version?: number | null
   /** 是否主角；false 表示配角。 */
   is_main?: boolean | null
+  /**
+   * 角色卡来源：`script` = 剧本人物表自动抓取，`manual` = 手工新增。
+   * 前端据此显示「剧本抓取」角标，避免用户以为是别人手工建的。
+   */
+  source?: 'script' | 'manual'
+  /** 最近一次抓取所依据的剧本版本（手工新增时为 null）。 */
+  source_script_version?: number | null
+  /** 用户是否手动改过设定；改过后剧本同步不再覆盖已有字段。 */
+  user_edited?: boolean
   archived?: boolean
   created_at?: string
   updated_at?: string
@@ -508,8 +528,23 @@ export interface Character {
 export type CharacterInput = Omit<Character, 'id' | 'created_at' | 'updated_at'> &
   Partial<Pick<Character, 'id' | 'created_at' | 'updated_at'>>
 
+/** `POST /episodes/{id}/characters/sync` 的返回：抓取统计 + 最新角色卡。 */
+export interface CharacterSyncResult {
+  episode_id: string
+  script_version?: number
+  created: number
+  updated: number
+  kept: number
+  total: number
+  names: string[]
+  items: Character[]
+}
+
 export interface CharacterAsset {
+  /** 媒体 id（后端 `id` 的别名，前端统一用这个字段）。 */
   media_id: string
+  /** 后端原始主键；仅在老接口未返回 `media_id` 时作为兜底。 */
+  id?: string
   version?: number
   asset_kind?: CharacterAssetKind | string
   url?: string
@@ -578,6 +613,8 @@ export type MediaStatus = 'PENDING' | 'READY' | 'FAILED' | 'REJECTED' | string
 export type SafetyState = 'PASS' | 'REVIEW' | 'BLOCK' | string
 
 export interface ShotCandidate {
+  /** 媒体行主键（后端叫 `id`，api 层会补成 media_id） */
+  id?: string
   media_id: string
   version?: number
   url?: string
@@ -585,6 +622,11 @@ export interface ShotCandidate {
   safety?: SafetyState
   created_at?: string
   rejected_reason?: string | null
+  /** 文件与记录不一致（历史同名覆盖），这类候选不可选、不可恢复 */
+  stale_reason?: string
+  broken?: boolean
+  safety_detail?: Record<string, unknown>
+  usable?: boolean
 }
 
 export interface Shot {
@@ -695,6 +737,12 @@ export interface VideoQuote {
   estimated_wait_seconds?: number
   per_shot?: VideoEstimatePerShot[]
   expires_at?: string
+  /** 逐镜首帧确认状态（估价接口返回）：出片前必须全部 confirmed。 */
+  shot_confirmation?: {
+    shot_no: number
+    confirmed_media_id: string | null
+    duration_ms?: number
+  }[]
   [key: string]: unknown
 }
 
@@ -782,6 +830,8 @@ export type TtsLineState = 'ready' | 'missing' | 'stale' | 'skipped'
 export interface TtsLineStatus {
   shot_id?: string
   shot_no?: number
+  /** 该镜第几句台词（0 起）。上传/跳过必须用它，按文本猜会在重复台词时错位 */
+  line_index?: number
   character?: string
   text?: string
   emotion?: string
@@ -790,8 +840,20 @@ export interface TtsLineStatus {
   source?: string
   media_id?: string | null
   track_id?: string | null
+  /** 该句使用的音色（TTS 才有；上传/跳过为空） */
+  voice_id?: string | null
+  /** 该句使用的语速倍率（FR-051） */
+  speed?: number | null
+  /** 音频真实时长（毫秒），用于试听列展示 */
+  duration_ms?: number
   stale?: boolean
   stale_reason?: string
+  /** 音色配方（供应商/音色/语速/指令）与当前设置不一致 → 这条是旧声音 */
+  voice_drift?: boolean
+  /** 指纹上线前生成的历史音频，无法判定是否一致 */
+  voice_legacy?: boolean
+  /** 按当前角色设置「应该」用的语速（对比用，不改音轨） */
+  expect_speed?: number | null
 }
 
 /** §12-8：内容拦截申诉。 */
@@ -831,6 +893,49 @@ export interface TtsBlockingProblem {
 }
 
 /** FR-050 / FR-051：TTS 预估 + 前置条件。 */
+/** 氛围音 / BGM 估价（按生成时长计费，不是按字数） */
+export interface BgmEstimate {
+  provider: string
+  model: string
+  seconds: number
+  min_seconds: number
+  max_seconds: number
+  billing_unit: string
+  /** 每秒多少分（估算口径） */
+  unit_price_cents: number
+  estimate_cents: number
+  quota_after_cents: number
+  can_generate: boolean
+  /** 指定镜头时返回：这段镜头在时间线上的窗口（可跨多个镜头共用一段垫乐） */
+  window?: {
+    shot_no: number
+    shot_from?: number
+    shot_to?: number
+    shot_nos?: number[]
+    shot_id: string
+    shot_ids?: string[]
+    start_ms: number
+    duration_ms: number
+  } | null
+}
+
+/** 按镜头内容拼出的氛围描述草稿（不调模型，零成本）。 */
+export interface BgmSuggestion {
+  prompt: string
+  shot_from: number
+  shot_to: number
+  shot_nos: number[]
+  start_ms: number
+  duration_ms: number
+  seconds: number
+  sources: {
+    scene: string
+    sfx: string[]
+    emotion: string[]
+    shots: number
+  }
+}
+
 export interface TtsEstimate {
   episode_id?: string
   shot_count?: number
@@ -933,6 +1038,8 @@ export interface ExportRecord {
 
 export interface RenderPreviewInput {
   watermark?: boolean
+  /** 只合成已就绪镜头，先看单镜成片效果（未就绪镜头跳过）。 */
+  partial?: boolean
 }
 
 export interface RenderExportInput {

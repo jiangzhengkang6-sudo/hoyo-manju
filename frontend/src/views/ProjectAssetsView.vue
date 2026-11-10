@@ -772,29 +772,11 @@ async function applyStyle(style: StyleAsset): Promise<void> {
 </template>
 
 <style scoped>
-.page {
-  padding: 24px;
-  display: flex;
-  flex-direction: column;
-  gap: var(--gap-lg);
-  max-width: 1400px;
-}
-.page-head {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 16px;
-  flex-wrap: wrap;
-}
-.page-head p {
-  margin-top: 4px;
-  max-width: 720px;
-}
 .sec-head {
   margin-bottom: 2px;
 }
 .form-col {
-  gap: 12px;
+  gap: var(--space-3);
 }
 /* 与 WorkspaceView / ProjectDetailView 同款概览网格（各视图局部定义，base.css 无此工具类） */
 .stat-row {
@@ -810,12 +792,12 @@ async function applyStyle(style: StyleAsset): Promise<void> {
 .toolbar {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-3);
 }
 .toolbar-filters {
   display: flex;
   align-items: flex-end;
-  gap: 12px;
+  gap: var(--space-3);
   flex-wrap: wrap;
 }
 .tb-field {
@@ -827,7 +809,7 @@ async function applyStyle(style: StyleAsset): Promise<void> {
 }
 .tb-actions {
   margin-left: auto;
-  gap: 8px;
+  gap: var(--space-2);
 }
 .tb-summary {
   padding-top: 10px;
@@ -837,8 +819,8 @@ async function applyStyle(style: StyleAsset): Promise<void> {
 /* 分段控件 */
 .seg {
   display: inline-flex;
-  padding: 3px;
-  gap: 3px;
+  padding: var(--space-1);
+  gap: var(--space-1);
   border-radius: var(--radius-sm);
   border: 1px solid var(--line);
   background: var(--bg-1);
@@ -851,7 +833,7 @@ async function applyStyle(style: StyleAsset): Promise<void> {
   border-radius: var(--radius-xs);
   background: transparent;
   color: var(--text-1);
-  font-size: 12.5px;
+  font-size: var(--fs-12);
   font-weight: 560;
   cursor: pointer;
   transition: all var(--dur) var(--ease);
@@ -868,9 +850,9 @@ async function applyStyle(style: StyleAsset): Promise<void> {
 
 /* 角色卡片 */
 .character-card {
-  padding: 12px;
+  padding: var(--space-3);
   display: flex;
-  gap: 12px;
+  gap: var(--space-3);
   align-items: flex-start;
 }
 .cc-thumb {
@@ -880,7 +862,7 @@ async function applyStyle(style: StyleAsset): Promise<void> {
 .cc-body {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-2);
   min-width: 0;
   flex: 1 1 auto;
 }
@@ -888,15 +870,15 @@ async function applyStyle(style: StyleAsset): Promise<void> {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-2);
 }
 .cc-name {
-  font-size: 15px;
+  font-size: var(--fs-16);
   font-weight: 650;
   min-width: 0;
 }
 .cc-badges {
-  gap: 6px;
+  gap: var(--space-2);
 }
 .cc-identity,
 .cc-appearance {
@@ -904,13 +886,13 @@ async function applyStyle(style: StyleAsset): Promise<void> {
   line-height: 1.5;
 }
 .cc-actions {
-  gap: 6px;
+  gap: var(--space-2);
   margin-top: 2px;
 }
 .cc-foot {
   display: flex;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-2);
   margin-top: auto;
   padding-top: 8px;
   border-top: 1px solid var(--line);
@@ -918,24 +900,24 @@ async function applyStyle(style: StyleAsset): Promise<void> {
 
 /* 画风卡片 */
 .style-card {
-  padding: 14px;
+  padding: var(--space-4);
   display: flex;
   flex-direction: column;
-  gap: 9px;
+  gap: var(--space-3);
 }
 .sc-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-2);
 }
 .sc-name {
-  font-size: 15px;
+  font-size: var(--fs-16);
   font-weight: 650;
   min-width: 0;
 }
 .sc-badges {
-  gap: 6px;
+  gap: var(--space-2);
 }
 .sc-desc {
   margin: 0;
@@ -945,11 +927,11 @@ async function applyStyle(style: StyleAsset): Promise<void> {
 .sc-palette {
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: var(--space-2);
 }
 .swatches {
   display: flex;
-  gap: 6px;
+  gap: var(--space-2);
   flex-wrap: wrap;
 }
 .swatch {
@@ -960,17 +942,17 @@ async function applyStyle(style: StyleAsset): Promise<void> {
   display: block;
 }
 .palette-text {
-  gap: 6px;
+  gap: var(--space-2);
 }
 .sc-meta {
   margin: 0;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
 }
 .sc-meta-row {
   display: flex;
-  gap: 8px;
+  gap: var(--space-2);
   margin: 0;
 }
 .sc-meta-row dt {
@@ -982,7 +964,7 @@ async function applyStyle(style: StyleAsset): Promise<void> {
   min-width: 0;
 }
 .sc-actions {
-  gap: 6px;
+  gap: var(--space-2);
 }
 .sc-foot {
   margin-top: auto;

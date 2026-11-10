@@ -91,6 +91,7 @@ def project_dict(session: Session, project: Project) -> dict[str, Any]:
         "aspect_ratio": project.aspect_ratio,
         "default_language": project.default_language,
         "default_style_id": project.default_style_id,
+        "default_voice_speed": project.default_voice_speed,
         "status": project.status,
         "episode_count": episode_count,
         "total_cost_cents": cost_service.project_total(session, project.id),
@@ -176,11 +177,18 @@ def character_dict(session: Session, character: CharacterAsset) -> dict[str, Any
     return {
         "id": character.id,
         "project_id": character.project_id,
+        # 为空 = 项目级公共角色；有值 = 只属于这一集的卡
+        "episode_id": character.episode_id,
         "name": character.name,
         # spec_json 同时保留（兼容旧调用方），并把字段拍平到顶层供前端读写；
         # 不拍平会导致前端读到空值、回写空串从而清空角色设定。
-        "spec_json": spec,
+        # 下划线开头的是内部标记（来源/手改），不返回给前端。
+        "spec_json": character_agent.public_spec(spec),
         **{field: spec.get(field) for field in CHARACTER_SPEC_FIELDS},
+        # 来源与手改标记：前端据此显示「剧本抓取」角标，并提示「同步不会覆盖你的修改」
+        "source": "script" if spec.get(character_agent.MARK_SOURCE_DOC) else "manual",
+        "source_script_version": spec.get(character_agent.MARK_SOURCE_VERSION),
+        "user_edited": bool(spec.get(character_agent.MARK_USER_EDITED)),
         "primary_media_id": character.primary_media_id,
         "primary_media_url": (
             media_service.media_url(session.get(MediaAsset, character.primary_media_id))

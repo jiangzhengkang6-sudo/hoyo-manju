@@ -78,3 +78,19 @@ export function percent(part?: number | null, total?: number | null): number {
   if (!part || !total || total <= 0) return 0
   return Math.max(0, Math.min(100, (part / total) * 100))
 }
+
+/** 供应商调用状态 → 中文。后端返回 SUCCEEDED 这类枚举，界面上不能直接铺。 */
+const PROVIDER_STATUS_LABELS: Record<string, string> = {
+  PENDING: '待提交',
+  QUEUED: '排队中',
+  RUNNING: '执行中',
+  SUCCEEDED: '成功',
+  FAILED: '失败',
+  CANCELLED: '已取消',
+  TIMEOUT: '超时',
+}
+
+export function providerStatusLabel(status?: string | null): string {
+  if (!status) return '—'
+  return PROVIDER_STATUS_LABELS[status.toUpperCase()] ?? '未知状态'
+}

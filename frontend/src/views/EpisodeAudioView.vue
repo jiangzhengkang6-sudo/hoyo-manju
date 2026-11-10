@@ -9,7 +9,7 @@ import { useEpisodeStore } from '@/stores/episode'
 import { useConfigStore } from '@/stores/config'
 import { useToastStore } from '@/stores/toast'
 import { downloadFile, reportError } from '@/api/client'
-import { jobsApi } from '@/api/jobs'
+import { cancelJob as cancelJobRequest, jobsApi } from '@/api/jobs'
 import {
   TRACK_KIND_LABEL,
   audioApi,
@@ -21,8 +21,10 @@ import {
 import { charactersApi, fetchCharacters } from '@/api/characters'
 import { formatCents } from '@/api/cost'
 import { mediaApi } from '@/api/media'
+import { projectsApi } from '@/api/projects'
 import { formatDuration, formatSeconds } from '@/utils/format'
 import GateCard from '@/components/GateCard.vue'
+import StageHead from '@/components/StageHead.vue'
 import JobInline from '@/components/JobInline.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import SkeletonBlock from '@/components/SkeletonBlock.vue'
@@ -31,9 +33,11 @@ import ModalDialog from '@/components/ModalDialog.vue'
 import { ApiError, toApiError } from '@/api/errors'
 import type {
   AudioTrack,
+  BgmEstimate,
   Character,
   Job,
   MediaAsset,
+  Project,
   SubtitleCue,
   TrackKind,
   TtsEstimate,
@@ -68,6 +72,40 @@ const voicePreviewId = ref<string | null>(null)
 
 /* FR-052：BGM 上传 —— 直接在本页传音频，不必先去素材库 */
 const bgmFile = ref<File | null>(null)
+
+/* 氛围音 / BGM 生成（分层方案：台词逐句，垫乐单独一轨） */
+const bgmPrompt = ref('雨夜巷口，雨点打在铁皮棚上，远处闷雷，低沉的弦乐缓慢铺底，没有人声。')
+const bgmSeconds = ref(30)
+const bgmVolumeDb = ref(-14)
+const bgmEstimate = ref<BgmEstimate | null>(null)
+const bgmBusy = ref(false)
+/** 空 = 整集垫乐；有值 = 从该镜开始 */
+const bgmShotNo = ref<number | null>(null)
+/** 与起始镜一起构成区间：null 或等于起始镜 = 只覆盖一个镜头 */
+const bgmShotTo = ref<number | null>(null)
+/** 用户手改过描述后，就不再用镜头内容自动覆盖 */
+const bgmPromptTouched = ref(false)
+const bgmSuggestBusy = ref(false)
+/** 用户手动选过作用范围后，不再替他改回默认 */
+const bgmScopeTouched = ref(false)
+const bgmShots = computed(() =>
+  shots.value.filter((shot) => shot.required !== false).slice().sort((a, b) => a.shot_no - b.shot_no),
+)
+/** 结束镜只能选起始镜之后：一段垫乐跨连续几个镜头共用 */
+const bgmShotToOptions = computed(() =>
+  bgmShots.value.filter((shot) => bgmShotNo.value !== null && shot.shot_no >= bgmShotNo.value),
+)
+const bgmRange = computed(() => {
+  if (bgmShotNo.value === null) return null
+  const from = bgmShotNo.value
+  const to = Math.max(from, bgmShotTo.value ?? from)
+  return { from, to }
+})
+const bgmScopeLabel = computed(() => {
+  const range = bgmRange.value
+  if (!range) return '整集'
+  return range.from === range.to ? `第 ${range.from} 镜` : `第 ${range.from}–${range.to} 镜`
+})
 const bgmUploading = ref(false)
 
 /**
@@ -117,6 +155,43 @@ function ensureCueDraft(cue: SubtitleCue): void {
       [cue.id]: { text: cue.text ?? '', start_ms: cue.start_ms ?? 0, end_ms: cue.end_ms ?? 0 },
     }
   }
+}
+
+/** 正在微调时间的字幕条（`null` = 都在只读态） */
+const cueTimeEditing = ref<string | null>(null)
+
+/** 字幕时间按秒展示：`0:02.7` 比裸毫秒 `2656` 好读得多。 */
+function cueTime(cue: SubtitleCue, edge: 'start' | 'end'): number {
+  const draft = cueOf(cue)
+  return Number(edge === 'start' ? draft.start_ms : draft.end_ms) / 1000
+}
+
+function cueDuration(cue: SubtitleCue): number {
+  return Math.max(cueTime(cue, 'end') - cueTime(cue, 'start'), 0)
+}
+
+/** 字幕时间保留 0.1 秒：`0:02.7`。`formatSeconds` 只到整秒，字幕对不齐。 */
+function formatCueTime(seconds: number): string {
+  const total = Math.max(0, seconds)
+  const minutes = Math.floor(total / 60)
+  const rest = total % 60
+  return `${minutes}:${rest.toFixed(1).padStart(4, '0')}`
+}
+
+function toggleCueTime(cue: SubtitleCue): void {
+  ensureCueDraft(cue)
+  cueTimeEditing.value = cueTimeEditing.value === cue.id ? null : cue.id
+}
+
+/** 输入按秒，落库仍按毫秒（后端口径不变）。 */
+function setCueTime(cue: SubtitleCue, edge: 'start' | 'end', raw: string): void {
+  const seconds = Number(raw)
+  if (!Number.isFinite(seconds) || seconds < 0) return
+  ensureCueDraft(cue)
+  const draft = cueDraft.value[cue.id]
+  if (!draft) return
+  if (edge === 'start') draft.start_ms = Math.round(seconds * 1000)
+  else draft.end_ms = Math.round(seconds * 1000)
 }
 
 async function saveCue(cue: SubtitleCue): Promise<void> {
@@ -204,6 +279,7 @@ const trackForm = reactive({
 })
 
 const projectId = computed(() => episode.value?.project_id ?? '')
+const project = ref<Project | null>(null)
 const episodeId = computed(() => store.episodeId ?? '')
 
 const jobs = computed<Job[]>(() =>
@@ -223,14 +299,18 @@ async function loadAll(): Promise<void> {
   loading.value = true
   error.value = null
   try {
-    const [v, c, t, tr, cu, media] = await Promise.all([
+    const [p, v, c, t, tr, cu, media] = await Promise.all([
+      projectId.value ? projectsApi.get(projectId.value).catch(() => null) : Promise.resolve(null),
       projectId.value ? fetchVoices(projectId.value).catch(() => []) : Promise.resolve([]),
-      projectId.value ? fetchCharacters(projectId.value).catch(() => []) : Promise.resolve([]),
+      projectId.value
+        ? fetchCharacters(projectId.value, { episodeId: episodeId.value }).catch(() => [])
+        : Promise.resolve([]),
       fetchTtsLines(episodeId.value).catch(() => []),
       fetchTracks(episodeId.value).catch(() => []),
       fetchSubtitles(episodeId.value).catch(() => []),
       mediaApi.episodeMedia(episodeId.value, 'audio').then((r) => (Array.isArray(r) ? r : r.items)).catch(() => []),
     ])
+    project.value = p
     voices.value = v
     characters.value = c
     ttsLines.value = t
@@ -241,6 +321,9 @@ async function loadAll(): Promise<void> {
     await loadTtsEstimate()
     // §12-4：逐句状态决定「上传音频 / 跳过」入口出现在哪几行
     await loadTtsLines()
+    // 氛围音按秒计费，估价随「时长」和「余额」变化
+    await loadBgmEstimate()
+    await ensureDefaultBgmScope()
   } catch (err) {
     error.value = toApiError(err)
   } finally {
@@ -254,6 +337,26 @@ onMounted(async () => {
 })
 
 watch(projectId, () => void loadAll())
+
+/**
+ * 配音任务成功时刷新逐句状态与音轨。
+ *
+ * 只靠 SSE 的 `media.created` 不够：它只更新概览/工作流，不会重取 `/tts/lines`，
+ * 结果就是音频已经生成好了，页面还写着「还有 N 句台词没有音频」。
+ */
+watch(
+  () => jobs.value.map((job) => `${job.id}:${job.status}`).join('|'),
+  async (next, prev) => {
+    if (!prev) return
+    const before = new Set(prev.split('|'))
+    const succeeded = next
+      .split('|')
+      .some((item) => !before.has(item) && item.endsWith(':SUCCEEDED'))
+    if (!succeeded) return
+    await Promise.all([loadTtsLines(), loadTtsEstimate(), loadAll()])
+    store.refreshLive()
+  },
+)
 
 function track(job: Job): void {
   jobIds.value = [job.id, ...jobIds.value]
@@ -310,6 +413,74 @@ async function bindVoice(character: Character, voiceId: string): Promise<void> {
   }
 }
 
+/** 项目「统一语速」：决定之后新建/同步角色的初始语速。 */
+async function saveDefaultSpeed(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement
+  const value = Number(input.value)
+  const current = project.value?.default_voice_speed ?? 1
+  if (!projectId.value) return
+  if (!Number.isFinite(value) || value < 0.5 || value > 2) {
+    toast.warn('语速范围是 0.5 ~ 2.0 倍')
+    input.value = current.toFixed(2)
+    return
+  }
+  try {
+    project.value = await projectsApi.patch(projectId.value, { default_voice_speed: value })
+    toast.success('统一语速已保存', `之后新建的角色初始语速 ${value.toFixed(2)}×`)
+  } catch {
+    input.value = current.toFixed(2)
+  }
+}
+
+/** 把统一语速刷到全部现有角色（只改设定，不重新合成）。 */
+async function applySpeedToAll(): Promise<void> {
+  if (!projectId.value) return
+  const speed = Number(project.value?.default_voice_speed ?? 1)
+  busy.value = true
+  try {
+    const res = await projectsApi.voiceSpeed(projectId.value, speed)
+    toast.success(
+      '已应用到全部角色',
+      `${res.count} 个角色 → ${speed.toFixed(2)}×；` +
+        (res.retimed ? `${res.retimed} 条已有配音已就地变速（0 费用）` : '暂无已有配音'),
+    )
+    await Promise.all([loadTtsLines(), loadAll()])
+  } catch {
+    /* api 层已提示 */
+  } finally {
+    busy.value = false
+  }
+}
+
+/** FR-051：调整角色语速。供应商不认 speed，后端会用 FFmpeg atempo 本地变速。 */
+async function changeVoiceSpeed(character: Character, event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement
+  const value = Number(input.value)
+  const current = character.voice_speed ?? 1
+  if (!character.voice_id) {
+    toast.warn('请先给这个角色绑定音色，再调语速')
+    input.value = String(current)
+    return
+  }
+  if (!Number.isFinite(value) || value < 0.5 || value > 2) {
+    toast.warn('语速范围是 0.5 ~ 2.0 倍')
+    input.value = String(current)
+    return
+  }
+  busy.value = true
+  try {
+    const updated = await charactersApi.bindVoice(character.id, character.voice_id, value)
+    characters.value = characters.value.map((item) => (item.id === updated.id ? updated : item))
+    toast.success('语速已更新', `${character.name} → ${value.toFixed(2)}×，已生成的这句会标记为待重跑`)
+    // 后端会把该角色已有的台词音轨标 stale，重新取一次逐句状态
+    await loadTtsLines()
+  } catch {
+    input.value = String(current)
+  } finally {
+    busy.value = false
+  }
+}
+
 /* ---------------- TTS ---------------- */
 
 /**
@@ -344,6 +515,14 @@ const degradeBusy = ref(false)
 const missingLines = computed(() => ttsLineStatus.value.filter((l) => l.status === 'missing'))
 /** 已有音频但已过期的台词。 */
 const staleLines = computed(() => ttsLineStatus.value.filter((l) => l.status === 'stale'))
+/** 参数变了、音频还是旧配方出来的（不重生成就会和别人的声音不一样）。 */
+const driftLines = computed(() => ttsLineStatus.value.filter((l) => l.voice_drift))
+/** 指纹上线前生成的历史音频：不知道当年用的哪套配方，只做提示、不判过期。 */
+const legacyLines = computed(() => ttsLineStatus.value.filter((l) => l.voice_legacy))
+/** 已经有音频的台词（第二张表只列它们，避免和上面的「缺音频」表重复）。 */
+const generatedLines = computed(() =>
+  ttsLineStatus.value.filter((line) => line.status !== 'missing'),
+)
 
 async function loadTtsLines(): Promise<void> {
   if (!episodeId.value) return
@@ -381,16 +560,86 @@ async function uploadManualAudio(line: TtsLineStatus, file: File | null): Promis
 }
 
 /** 该句在所属镜头内的序号（后端按序号定位，不能传全局下标）。 */
+/** 已有音频的即时调速：本地变速，不调用模型，因此不产生费用。 */
+async function retimeLine(line: TtsLineStatus, event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement
+  const value = Number(input.value)
+  const current = line.speed ?? 1
+  if (!episodeId.value || !line.track_id) return
+  if (!Number.isFinite(value) || value < 0.5 || value > 2) {
+    toast.warn('语速范围是 0.5 ~ 2.0 倍')
+    input.value = String(current)
+    return
+  }
+  if (Math.abs(value - current) < 0.001) return
+  busy.value = true
+  try {
+    await audioApi.ttsSpeed(episodeId.value, line.track_id, value)
+    toast.success('语速已重调', `${value.toFixed(2)}× · 本地变速，未调用模型、无费用`)
+    await Promise.all([loadTtsLines(), loadAll()])
+  } catch {
+    input.value = String(current)
+  } finally {
+    busy.value = false
+  }
+}
+
+/** 性别 / 供应商都说人话：后端存的是 female、qwen 这类枚举。 */
+const GENDER_LABELS: Record<string, string> = { female: '女声', male: '男声', neutral: '中性' }
+const PROVIDER_LABELS: Record<string, string> = {
+  qwen: '通义千问',
+  mock: '本地模拟',
+  openai: 'OpenAI',
+  azure: 'Azure',
+  minimax: 'MiniMax',
+  volcano: '火山引擎',
+  fish: 'Fish Audio',
+}
+
+function genderLabel(gender?: string | null): string {
+  if (!gender) return ''
+  return GENDER_LABELS[gender.toLowerCase()] ?? ''
+}
+
+function providerLabel(provider?: string | null): string {
+  if (!provider) return ''
+  return PROVIDER_LABELS[provider.toLowerCase()] ?? '其他供应商'
+}
+
+/** 音色列展示中文名，别把 `voc_xxx` 这种内部 id 直接倒给用户。 */
+function lineVoiceName(line: TtsLineStatus): string {
+  if (!line.voice_id) return '—'
+  return voiceById.value[line.voice_id]?.name ?? '未知音色'
+}
+
+/** 状态一律中文；后端返回的是 ready/missing/skipped 这类枚举。 */
+function lineStatusLabel(line: TtsLineStatus): string {
+  // 「旧音色」比「已过期」更具体：不是任务失败，是配方变了、这条还是旧声音
+  if (line.voice_drift) return '旧音色'
+  if (line.stale) return '已过期'
+  if (line.source === 'skipped') return '已跳过'
+  if (line.source === 'manual') return '用户上传'
+  const labels: Record<string, string> = {
+    ready: '已就绪',
+    missing: '待生成',
+    stale: '已过期',
+    skipped: '已跳过',
+  }
+  return labels[line.status] ?? '已就绪'
+}
+
 function lineIndexInShot(line: TtsLineStatus): number {
+  // 后端现在直接返回 line_index；旧数据才退回「按文本找第几条」
+  if (typeof line.line_index === 'number') return line.line_index
   const same = ttsLineStatus.value.filter((l) => l.shot_no === line.shot_no)
   return Math.max(0, same.findIndex((l) => l.text === line.text))
 }
 
-async function skipLines(shotNos: number[], reason = ''): Promise<void> {
+async function skipLines(shotNos: number[], reason = '', lineIndex?: number): Promise<void> {
   if (!episodeId.value || !shotNos.length) return
   degradeBusy.value = true
   try {
-    await audioApi.ttsSkip(episodeId.value, { shot_nos: shotNos, reason })
+    await audioApi.ttsSkip(episodeId.value, { shot_nos: shotNos, reason, line_index: lineIndex })
     toast.info(`已跳过 ${shotNos.length} 个镜头的配音，可继续预览`)
     await Promise.all([loadTtsLines(), loadAll()])
   } catch (err) {
@@ -440,6 +689,138 @@ async function generateTts(scope: 'all' | 'confirmed', characterId?: string): Pr
 }
 
 /* ---------------- BGM ---------------- */
+
+async function loadBgmEstimate(): Promise<void> {
+  if (!episodeId.value) return
+  const range = bgmRange.value
+  try {
+    bgmEstimate.value = await audioApi.bgmEstimate(
+      episodeId.value,
+      range
+        ? { shot_from: range.from, shot_to: range.to }
+        : { seconds: bgmSeconds.value },
+    )
+  } catch {
+    bgmEstimate.value = null
+  }
+}
+
+/**
+ * 按所选镜头的内容重写氛围描述。
+ *
+ * 不同镜头要不同的垫乐，但每次都手写太累；分镜里已经有场景、音效和情绪，
+ * 后端直接拼一句草稿（不调模型、不扣费）。用户手改过就默认不覆盖。
+ */
+async function refreshBgmPrompt(force = false): Promise<void> {
+  const id = episodeId.value
+  const range = bgmRange.value
+  if (!id || !range) return
+  if (bgmPromptTouched.value && !force) return
+  bgmSuggestBusy.value = true
+  try {
+    const suggestion = await audioApi.bgmSuggest(id, range.from, range.to)
+    bgmPrompt.value = suggestion.prompt
+    bgmPromptTouched.value = false
+  } catch {
+    /* 建议拿不到不影响手动写 */
+  } finally {
+    bgmSuggestBusy.value = false
+  }
+}
+
+/**
+ * 生成一轨氛围音 / BGM。
+ *
+ * 只提交一次请求：模型那侧一次就能出「环境声 + 音乐」，我们把它当垫乐挂到
+ * 时间线（音量默认 -14dB，淡入淡出），台词轨完全不受影响。
+ */
+async function generateBgm(): Promise<void> {
+  if (!episodeId.value) return
+  const prompt = bgmPrompt.value.trim()
+  if (prompt.length < 4) {
+    toast.warn('先写一句氛围描述', '例如：雨夜巷口，雨声与低沉的弦乐')
+    return
+  }
+  const range = bgmRange.value
+  bgmBusy.value = true
+  try {
+    const job = await audioApi.bgmGenerate(episodeId.value, {
+      prompt,
+      seconds: bgmSeconds.value,
+      ...(range ? { shot_from: range.from, shot_to: range.to } : {}),
+      volume_db: bgmVolumeDb.value,
+    })
+    track(job)
+    toast.info(
+      range ? `${bgmScopeLabel.value}氛围音生成中` : '整集氛围音生成中',
+      `${bgmEstimate.value ? formatCents(bgmEstimate.value.estimate_cents) : '—'} · 完成后自动挂到时间线`,
+    )
+  } catch {
+    /* api 层已提示 */
+  } finally {
+    bgmBusy.value = false
+  }
+}
+
+function onBgmScopePick(event: Event): void {
+  const raw = (event.target as HTMLSelectElement).value
+  bgmScopeTouched.value = true
+  bgmShotNo.value = raw ? Number(raw) : null
+  // 换了起点就把终点拉回起点，避免出现「起点在 5、终点在 2」的空区间
+  bgmShotTo.value = bgmShotNo.value
+  if (bgmShotNo.value) {
+    const shot = shots.value.find((item) => item.shot_no === bgmShotNo.value)
+    if (shot?.duration_ms) {
+      bgmSeconds.value = Math.max(3, Math.ceil(shot.duration_ms / 1000))
+    }
+  }
+  void afterScopeChange()
+}
+
+function onBgmToPick(event: Event): void {
+  const raw = (event.target as HTMLSelectElement).value
+  bgmShotTo.value = raw ? Number(raw) : bgmShotNo.value
+  void afterScopeChange()
+}
+
+async function afterScopeChange(): Promise<void> {
+  await loadBgmEstimate()
+  await refreshBgmPrompt()
+}
+
+/** 首次拿到分镜时，把作用范围落在第 1 镜：让「描述跟着镜头走」一眼可见。 */
+const bgmDefaultApplied = ref(false)
+async function ensureDefaultBgmScope(): Promise<void> {
+  if (bgmDefaultApplied.value || bgmScopeTouched.value) return
+  if (bgmShotNo.value !== null) {
+    bgmDefaultApplied.value = true
+    return
+  }
+  if (!bgmShots.value.length) return
+  bgmDefaultApplied.value = true
+  bgmShotNo.value = bgmShots.value[0].shot_no
+  bgmShotTo.value = bgmShotNo.value
+  await afterScopeChange()
+}
+
+// 分镜由 store 统一加载，可能晚于本页首次渲染
+watch(bgmShots, () => void ensureDefaultBgmScope())
+
+/**
+ * 环境音轨覆盖了哪几个镜头。
+ *
+ * 后端把范围记在素材 metadata 里（`shot_from`/`shot_to`），单镜时两者相等；
+ * 拿不到就返回空串，列表照常显示时间区间。
+ */
+function trackShotScope(track: AudioTrack): string {
+  const media = track.media as { metadata_json?: Record<string, unknown> } | undefined
+  const from = Number(media?.metadata_json?.shot_from ?? 0)
+  const to = Number(media?.metadata_json?.shot_to ?? 0)
+  if (!from) return ''
+  return from === to ? `第 ${from} 镜` : `第 ${from}–${to} 镜`
+}
+
+watch(bgmSeconds, () => void loadBgmEstimate())
 
 function openTrackForm(): void {
   trackForm.media_id = audioMedia.value[0]?.id ?? ''
@@ -538,8 +919,8 @@ async function retryJob(id: string): Promise<void> {
 
 async function cancelJob(id: string): Promise<void> {
   try {
-    const res = await jobsApi.cancel(id)
-    if (res.job) store.trackJob(res.job)
+    const job = await cancelJobRequest(id)
+    if (job) store.trackJob(job)
   } catch {
     /* api 层已提示 */
   }
@@ -591,6 +972,11 @@ function handleGateError(err: unknown): void {
 
 <template>
   <div class="stage">
+    <StageHead
+      index="05"
+      title="音频字幕"
+      description="台词配音、背景音乐与字幕时间轴，都在这一步对齐。"
+    />
     <GateCard
       :gate="pendingGate"
       :workflow="workflow"
@@ -613,7 +999,7 @@ function handleGateError(err: unknown): void {
 
     <ErrorState v-if="error" :error="error" context="加载音频数据" @retry="loadAll" />
 
-    <div class="two-col">
+    <div class="two-col two-col--even">
       <section class="card">
         <div class="card-head">
           <h2 class="title-md">音色库</h2>
@@ -641,10 +1027,10 @@ function handleGateError(err: unknown): void {
                 <div class="row-wrap">
                   <strong class="small">{{ voice.name ?? voice.id }}</strong>
                   <span v-if="voice.builtin" class="badge">内置</span>
-                  <span v-if="voice.gender" class="badge">{{ voice.gender }}</span>
-                  <span v-if="voice.language" class="badge mono">{{ voice.language }}</span>
+                  <span v-if="voice.gender" class="badge">{{ genderLabel(voice.gender) }}</span>
+                  <span v-if="voice.language" class="badge">{{ voice.language }}</span>
                 </div>
-                <span class="mono tiny dim">{{ voice.provider || '—' }} · {{ voice.id }}</span>
+                <span class="tiny dim">{{ providerLabel(voice.provider) }} · 可直接试听或绑定给角色</span>
               </div>
               <div class="row">
                 <button
@@ -656,8 +1042,7 @@ function handleGateError(err: unknown): void {
                 </button>
               </div>
               <div v-if="voicePreviewId === voice.id" class="voice-preview">
-                <audio :src="audioApi.voicePreviewUrl(voice.id)" controls />
-                <span class="mono tiny dim-2">{{ audioApi.voicePreviewUrl(voice.id) }}</span>
+                <audio :src="audioApi.voicePreviewUrl(voice.id)" controls preload="none" />
               </div>
             </li>
           </ul>
@@ -666,10 +1051,40 @@ function handleGateError(err: unknown): void {
 
       <section class="card">
         <div class="card-head">
-          <h2 class="title-md">角色音色绑定</h2>
-          <span class="mono tiny dim">{{ characters.length }} 个角色</span>
+          <div class="row">
+            <h2 class="title-md">角色音色绑定</h2>
+            <span class="mono tiny dim">{{ characters.length }} 个角色</span>
+          </div>
+          <div class="row-wrap speed-bar">
+            <label class="speed-field" title="新建/剧本同步角色时的初始语速">
+              <span class="tiny dim">统一语速</span>
+              <input
+                class="input mono speed-input"
+                type="number"
+                min="0.5"
+                max="2"
+                step="0.05"
+                :value="(project?.default_voice_speed ?? 1).toFixed(2)"
+                :disabled="busy"
+                @change="saveDefaultSpeed($event)"
+              />
+              <span class="tiny dim">×</span>
+            </label>
+            <button
+              type="button"
+              class="btn btn-sm btn-ghost"
+              :disabled="busy || !characters.length"
+              title="把统一语速写进每个角色；已有配音会标记为待重跑"
+              @click="applySpeedToAll"
+            >
+              应用到全部角色
+            </button>
+          </div>
         </div>
         <div class="card-body">
+          <p class="hint">
+            「统一语速」决定之后新建角色的初始语速；已有音频可在下方台词表逐条即时调整。
+          </p>
           <EmptyState
             v-if="!characters.length"
             compact
@@ -683,21 +1098,38 @@ function handleGateError(err: unknown): void {
                 <div class="row-wrap">
                   <strong class="small">{{ character.name }}</strong>
                   <span v-if="character.voice_id" class="badge badge-ok">
-                    {{ voiceById[character.voice_id]?.name ?? character.voice_id }}
+                    {{ voiceById[character.voice_id]?.name ?? '未知音色' }}
                   </span>
                   <span v-else class="badge badge-warn">未绑定</span>
                 </div>
               </div>
-              <select
-                class="select bind-select"
-                :value="character.voice_id ?? ''"
-                @change="bindVoice(character, ($event.target as HTMLSelectElement).value)"
-              >
-                <option value="">选择音色…</option>
-                <option v-for="voice in voices" :key="voice.id" :value="voice.id">
-                  {{ voice.name ?? voice.id }}
-                </option>
-              </select>
+              <div class="bind-controls">
+                <select
+                  class="select bind-select"
+                  :value="character.voice_id ?? ''"
+                  @change="bindVoice(character, ($event.target as HTMLSelectElement).value)"
+                >
+                  <option value="">选择音色…</option>
+                  <option v-for="voice in voices" :key="voice.id" :value="voice.id">
+                    {{ voice.name ?? voice.id }}
+                  </option>
+                </select>
+                <label class="speed-field" :class="{ disabled: !character.voice_id }">
+                  <span class="tiny dim">语速</span>
+                  <input
+                    class="input mono speed-input"
+                    type="number"
+                    min="0.5"
+                    max="2"
+                    step="0.05"
+                    :value="character.voice_speed ?? 1"
+                    :disabled="busy || !character.voice_id"
+                    :title="character.voice_id ? '0.5 ~ 2.0 倍；改完需重新生成配音' : '请先绑定音色'"
+                    @change="changeVoiceSpeed(character, $event)"
+                  />
+                  <span class="tiny dim">×</span>
+                </label>
+              </div>
             </li>
           </ul>
         </div>
@@ -708,13 +1140,16 @@ function handleGateError(err: unknown): void {
       <div class="card-head">
         <div class="row">
           <h2 class="title-md">台词配音（TTS）</h2>
-          <span class="mono tiny dim">{{ ttsLines.length }} 条</span>
+          <span class="mono tiny dim">
+            {{ ttsCounts.total ?? ttsLines.length }} 句 · 已生成 {{ ttsCounts.ready ?? 0 }}
+          </span>
           <span
-            v-if="ttsEstimate && ttsEstimate.line_count"
+            v-if="(ttsCounts.missing ?? 0) > 0"
             class="mono tiny dim"
-            title="本次将合成的台词条数与预估成本"
+            title="尚未合成音频的台词条数与预估成本"
           >
-            待合成 {{ ttsEstimate.line_count }} 句 · 预估 {{ formatCents(ttsEstimate.estimate_cents) }}
+            待合成 {{ ttsCounts.missing }} 句 ·
+            <template v-if="ttsEstimate">预估 {{ formatCents(ttsEstimate.estimate_cents) }}</template>
           </span>
         </div>
         <div class="row-wrap">
@@ -738,7 +1173,7 @@ function handleGateError(err: unknown): void {
           </button>
         </div>
       </div>
-      <div class="card-body col" style="gap: 14px">
+      <div class="card-body col" style="gap: var(--space-4)">
         <!-- FR-050：前置条件不满足时明确告知「差什么、去哪补」，而不是让提交失败 -->
         <div v-if="ttsBlocked" class="voice-block">
           <div class="voice-block-head">
@@ -807,7 +1242,7 @@ function handleGateError(err: unknown): void {
                       type="button"
                       class="btn btn-sm btn-ghost"
                       :disabled="degradeBusy || line.shot_no == null"
-                      @click="skipLines([line.shot_no as number], '用户选择跳过该句配音')"
+                      @click="skipLines([line.shot_no as number], '用户选择跳过该句配音', lineIndexInShot(line))"
                     >
                       跳过
                     </button>
@@ -817,8 +1252,15 @@ function handleGateError(err: unknown): void {
             </tbody>
           </table>
         </div>
-        <div v-else-if="staleLines.length" class="hint">
-          有 {{ staleLines.length }} 句台词的音频已过期（角色音色或语速变过），建议重新生成。
+        <div v-if="staleLines.length || legacyLines.length" class="hint">
+          <template v-if="driftLines.length">
+            有 {{ driftLines.length }} 句台词的音色参数已经改过，现有音频还是按旧参数生成的
+            —— 和新生成的几句听起来会是两个声音，建议一起重新生成。
+          </template>
+          <template v-if="legacyLines.length">
+            <span v-if="driftLines.length">；</span>
+            另有 {{ legacyLines.length }} 句是早期生成的音频，没有记录当时的音色参数，可能和现在的音色不一致。
+          </template>
         </div>
         <EmptyState
           v-if="!ttsLines.length"
@@ -834,34 +1276,62 @@ function handleGateError(err: unknown): void {
               <th style="width: 110px">角色</th>
               <th>台词</th>
               <th style="width: 130px">音色</th>
-              <th style="width: 80px">状态</th>
+              <th style="width: 104px" title="本地变速，不重新调用模型">语速</th>
+              <th style="width: 112px">状态</th>
               <th style="width: 110px">试听</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="(line, i) in ttsLines" :key="line.media_id ?? i">
+            <tr v-for="(line, i) in generatedLines" :key="line.track_id ?? line.media_id ?? i">
               <td class="mono">{{ line.shot_no != null ? `#${line.shot_no}` : '—' }}</td>
               <td class="small">{{ line.character ?? '—' }}</td>
               <td class="tiny muted">{{ line.text ?? '—' }}</td>
-              <td class="tiny dim mono">{{ line.voice_id ?? '—' }}</td>
+              <td class="small">{{ lineVoiceName(line) }}</td>
+              <td>
+                <label class="speed-field">
+                  <input
+                    class="input mono speed-input"
+                    type="number"
+                    min="0.5"
+                    max="2"
+                    step="0.05"
+                    :value="(line.speed ?? 1).toFixed(2)"
+                    :disabled="busy || !line.track_id"
+                    title="只调这一条，本地变速，不产生费用"
+                    @change="retimeLine(line, $event)"
+                  />
+                  <span class="tiny dim">×</span>
+                </label>
+              </td>
               <td>
                 <span
                   class="badge"
-                  :class="line.stale ? 'badge-warn' : line.source === 'skipped' ? 'badge' : 'badge-ok'"
-                >
-                  {{
-                    line.stale
-                      ? '已过期'
+                  :class="
+                    line.stale || line.voice_drift
+                      ? 'badge-warn'
                       : line.source === 'skipped'
-                        ? '已跳过'
-                        : line.source === 'manual'
-                          ? '用户上传'
-                          : (line.status ?? '就绪')
-                  }}
+                        ? 'badge'
+                        : 'badge-ok'
+                  "
+                  :title="line.stale_reason || ''"
+                >
+                  {{ lineStatusLabel(line) }}
+                </span>
+                <span
+                  v-if="line.voice_legacy"
+                  class="badge voice-legacy"
+                  title="早期生成的音频，没有记录当时的音色参数，可能和现在的音色不一致"
+                >
+                  旧版本
                 </span>
               </td>
               <td>
-                <audio v-if="line.media_id" :src="mediaApi.contentUrl(line.media_id)" controls preload="none" />
+                <audio
+                  v-if="line.media_id"
+                  :src="mediaApi.contentUrl(line.media_id)"
+                  controls
+                  preload="metadata"
+                />
                 <span v-else class="tiny dim-2">无音频</span>
               </td>
             </tr>
@@ -870,13 +1340,115 @@ function handleGateError(err: unknown): void {
       </div>
     </section>
 
-    <div class="two-col">
+    <div class="two-col two-col--even">
       <section class="card">
         <div class="card-head">
           <h2 class="title-md">BGM / 音效</h2>
-          <button type="button" class="btn btn-sm btn-primary" @click="openTrackForm">挂载音轨</button>
+          <button type="button" class="btn btn-sm btn-ghost" @click="openTrackForm">挂载已有音频</button>
         </div>
-        <div class="card-body">
+        <div class="card-body col">
+          <!-- 生成垫乐：写场景不写台词，一次出一轨环境声/音乐 -->
+          <div class="bgm-gen">
+            <div class="bgm-scope">
+              <span class="label">作用范围</span>
+              <select class="select bgm-scope-select" :value="bgmShotNo ?? ''" @change="onBgmScopePick">
+                <option value="">整集垫乐（从 0 秒铺到尾）</option>
+                <option v-for="shot in bgmShots" :key="shot.id" :value="shot.shot_no">
+                  从第 {{ shot.shot_no }} 镜
+                </option>
+              </select>
+              <template v-if="bgmShotNo !== null">
+                <span class="tiny dim">到</span>
+                <select
+                  class="select bgm-scope-select"
+                  :value="bgmShotTo ?? bgmShotNo"
+                  @change="onBgmToPick"
+                >
+                  <option v-for="shot in bgmShotToOptions" :key="shot.id" :value="shot.shot_no">
+                    第 {{ shot.shot_no }} 镜
+                  </option>
+                </select>
+              </template>
+              <span class="hint">
+                <template v-if="bgmRange">
+                  覆盖 {{ bgmScopeLabel }}<template v-if="bgmEstimate?.window"> · {{ formatDuration(bgmEstimate.window.duration_ms) }}</template>，
+                  按这段长度裁剪；相邻几镜可以共用一段
+                </template>
+                <template v-else>整集一条，重新生成会整条替换</template>
+              </span>
+            </div>
+            <div class="field grow">
+              <div class="row-between">
+                <label class="label" for="bgm-prompt">氛围描述</label>
+                <button
+                  v-if="bgmRange"
+                  type="button"
+                  class="btn btn-sm btn-ghost"
+                  :disabled="bgmSuggestBusy"
+                  @click="refreshBgmPrompt(true)"
+                >
+                  {{ bgmSuggestBusy ? '整理中…' : '按镜头重写' }}
+                </button>
+              </div>
+              <textarea
+                id="bgm-prompt"
+                v-model="bgmPrompt"
+                class="textarea bgm-prompt"
+                rows="2"
+                placeholder="雨夜巷口，雨点打在铁皮棚上，远处闷雷，低沉的弦乐缓慢铺底，没有人声。"
+                @input="bgmPromptTouched = true"
+              />
+              <span class="hint">
+                <template v-if="bgmRange">
+                  {{
+                    bgmPromptTouched
+                      ? '已手改，切换镜头不会再覆盖；点「按镜头重写」可回到建议文案'
+                      : '已按所选镜头的场景、音效和情绪生成，可直接改'
+                  }}
+                </template>
+                <template v-else>写场景、乐器与情绪，别写台词——这一轨只做垫乐，人声仍走上面的逐句配音。</template>
+              </span>
+            </div>
+            <div class="bgm-side">
+              <label class="field" for="bgm-seconds">
+                <span class="label">时长</span>
+                <input
+                  id="bgm-seconds"
+                  v-model.number="bgmSeconds"
+                  class="input mono"
+                  type="number"
+                  :min="bgmEstimate?.min_seconds ?? 3"
+                  :max="bgmEstimate?.max_seconds ?? 120"
+                  :disabled="bgmRange !== null"
+                  step="5"
+                />
+              </label>
+              <label class="field" for="bgm-volume">
+                <span class="label">音量</span>
+                <select id="bgm-volume" v-model.number="bgmVolumeDb" class="select">
+                  <option :value="-18">轻柔 −18dB</option>
+                  <option :value="-14">标准 −14dB</option>
+                  <option :value="-10">稍响 −10dB</option>
+                </select>
+              </label>
+              <button
+                type="button"
+                class="btn btn-primary btn-block"
+                :disabled="bgmBusy || bgmEstimate?.can_generate === false"
+                @click="generateBgm"
+              >
+                {{ bgmBusy ? '提交中…' : '生成氛围音' }}
+              </button>
+              <span v-if="bgmEstimate" class="tiny dim">
+                约 {{ formatCents(bgmEstimate.estimate_cents) }} · {{ bgmEstimate.seconds }} 秒
+              </span>
+              <span v-else class="tiny dim">按生成时长计费</span>
+              <span v-if="bgmRange" class="tiny dim-2">
+                按这段实际生成长度结算，可能略高于估价
+              </span>
+            </div>
+          </div>
+
           <EmptyState
             v-if="!tracks.length"
             compact
@@ -886,21 +1458,32 @@ function handleGateError(err: unknown): void {
           />
           <ul v-else class="track-list">
             <li v-for="(t, i) in tracks" :key="t.id ?? i" class="track-item">
-              <div class="grow">
-                <div class="row-wrap">
-                  <span class="badge badge-accent">{{ TRACK_KIND_LABEL[t.kind] ?? t.kind }}</span>
-                  <span class="mono tiny dim">
-                    {{ formatSeconds((t.start_ms ?? 0) / 1000) }} ~ {{ formatSeconds((t.end_ms ?? 0) / 1000) }}
-                  </span>
-                  <span class="mono tiny dim">{{ t.volume_db }}dB</span>
-                  <span v-if="t.rights_declared" class="badge badge-ok">权利已声明</span>
-                  <span v-else class="badge badge-warn">权利未声明</span>
+              <div class="track-head">
+                <div class="grow">
+                  <div class="row-wrap">
+                    <span class="badge badge-accent">{{ TRACK_KIND_LABEL[t.kind] ?? t.kind }}</span>
+                    <span v-if="trackShotScope(t)" class="badge">{{ trackShotScope(t) }}</span>
+                    <span class="mono tiny dim">
+                      {{ formatSeconds((t.start_ms ?? 0) / 1000) }} ~ {{ formatSeconds((t.end_ms ?? 0) / 1000) }}
+                    </span>
+                    <span class="mono tiny dim">{{ t.volume_db }}dB</span>
+                    <span v-if="t.rights_declared" class="badge badge-ok">权利已声明</span>
+                    <span v-else class="badge badge-warn">权利未声明</span>
+                  </div>
+                  <p v-if="t.text" class="tiny dim ellipsis track-prompt" :title="String(t.text)">
+                    {{ t.text }}
+                  </p>
                 </div>
-                <span class="mono tiny dim-2">{{ t.media_id }}</span>
+                <button type="button" class="btn btn-sm btn-danger" :disabled="busy" @click="removeTrack(t)">
+                  移除
+                </button>
               </div>
-              <button type="button" class="btn btn-sm btn-danger" :disabled="busy" @click="removeTrack(t)">
-                移除
-              </button>
+              <audio
+                v-if="t.media_id"
+                :src="mediaApi.contentUrl(t.media_id ?? '')"
+                controls
+                preload="none"
+              />
             </li>
           </ul>
         </div>
@@ -917,7 +1500,7 @@ function handleGateError(err: unknown): void {
             <button type="button" class="btn btn-sm btn-ghost" @click="exportSubtitle('vtt')">导出 VTT</button>
           </div>
         </div>
-        <div class="card-body col" style="gap: 10px">
+        <div class="card-body col" style="gap: var(--space-3)">
           <EmptyState
             v-if="!cues.length"
             compact
@@ -929,7 +1512,7 @@ function handleGateError(err: unknown): void {
             <!-- FR-053：字幕人工校正，改完统一保存 -->
             <div v-if="cuesDirty" class="cue-bar">
               <span class="tiny">有未保存的字幕改动</span>
-              <span class="row" style="gap: 6px">
+              <span class="row" style="gap: var(--space-2)">
                 <button type="button" class="btn btn-sm btn-primary" :disabled="busy" @click="saveAllCues">
                   {{ busy ? '保存中…' : '保存全部字幕' }}
                 </button>
@@ -940,29 +1523,57 @@ function handleGateError(err: unknown): void {
             </div>
             <ul class="cue-list">
               <li v-for="(cue, i) in cues" :key="cue.id" class="cue-item">
-                <span class="mono tiny dim cue-idx">{{ cue.index ?? i + 1 }}</span>
-                <div class="cue-times">
-                  <input
-                    :value="cueOf(cue).start_ms"
-                    class="input mono cue-ms"
-                    type="number"
-                    step="100"
-                    min="0"
-                    :aria-label="`第 ${i + 1} 条字幕开始时间`"
-                    @focus="ensureCueDraft(cue)"
-                    @input="ensureCueDraft(cue); cueOf(cue).start_ms = Number(($event.target as HTMLInputElement).value)"
-                  />
-                  <span class="dim-2 tiny">→</span>
-                  <input
-                    :value="cueOf(cue).end_ms"
-                    class="input mono cue-ms"
-                    type="number"
-                    step="100"
-                    min="0"
-                    :aria-label="`第 ${i + 1} 条字幕结束时间`"
-                    @focus="ensureCueDraft(cue)"
-                    @input="ensureCueDraft(cue); cueOf(cue).end_ms = Number(($event.target as HTMLInputElement).value)"
-                  />
+                <div class="cue-head">
+                  <span class="mono tiny dim cue-idx">{{ cue.index ?? i + 1 }}</span>
+                  <div class="cue-times">
+                    <!-- 只读态给出人话时间；想看毫秒/微调再点开 -->
+                    <button
+                      v-if="cueTimeEditing !== cue.id"
+                      type="button"
+                      class="cue-time-pill"
+                      :title="`${cueOf(cue).start_ms} → ${cueOf(cue).end_ms} 毫秒，点击微调`"
+                      @click="toggleCueTime(cue)"
+                    >
+                      {{ formatCueTime(cueTime(cue, 'start')) }} → {{ formatCueTime(cueTime(cue, 'end')) }}
+                    </button>
+                    <template v-else>
+                      <input
+                        :value="cueTime(cue, 'start')"
+                        class="input mono cue-sec"
+                        type="number"
+                        step="0.1"
+                        min="0"
+                        :aria-label="`第 ${i + 1} 条字幕开始时间（秒）`"
+                        @focus="ensureCueDraft(cue)"
+                        @input="setCueTime(cue, 'start', ($event.target as HTMLInputElement).value)"
+                      />
+                      <span class="dim-2 tiny">→</span>
+                      <input
+                        :value="cueTime(cue, 'end')"
+                        class="input mono cue-sec"
+                        type="number"
+                        step="0.1"
+                        min="0"
+                        :aria-label="`第 ${i + 1} 条字幕结束时间（秒）`"
+                        @focus="ensureCueDraft(cue)"
+                        @input="setCueTime(cue, 'end', ($event.target as HTMLInputElement).value)"
+                      />
+                      <span class="tiny dim-2">秒</span>
+                      <button type="button" class="btn btn-sm btn-ghost" @click="cueTimeEditing = null">
+                        完成
+                      </button>
+                    </template>
+                    <span class="tiny dim-2">{{ cueDuration(cue).toFixed(1) }} 秒</span>
+                  </div>
+                  <span v-if="cue.shot_no != null" class="badge mono">第 {{ cue.shot_no }} 镜</span>
+                  <button
+                    type="button"
+                    class="btn btn-sm cue-save"
+                    :disabled="!cueDraft[cue.id] || cueBusy === cue.id"
+                    @click="saveCue(cue)"
+                  >
+                    {{ cueBusy === cue.id ? '…' : '保存' }}
+                  </button>
                 </div>
                 <input
                   :value="cueOf(cue).text"
@@ -971,19 +1582,10 @@ function handleGateError(err: unknown): void {
                   @focus="ensureCueDraft(cue)"
                   @input="ensureCueDraft(cue); cueOf(cue).text = ($event.target as HTMLInputElement).value"
                 />
-                <span v-if="cue.shot_no != null" class="badge mono">#{{ cue.shot_no }}</span>
-                <button
-                  type="button"
-                  class="btn btn-sm"
-                  :disabled="!cueDraft[cue.id] || cueBusy === cue.id"
-                  @click="saveCue(cue)"
-                >
-                  {{ cueBusy === cue.id ? '…' : '保存' }}
-                </button>
               </li>
             </ul>
             <span class="hint">
-              时间单位为毫秒（与后端一致）。改完可重新导出 SRT/VTT；已合成的成片需重新合成才会生效。
+              时间按秒显示，点时间可微调到 0.1 秒。改完可重新导出 SRT/VTT；已合成的成片需重新合成才会生效。
             </span>
           </template>
         </div>
@@ -1080,7 +1682,7 @@ function handleGateError(err: unknown): void {
             {{ media.id }}（{{ formatDuration(media.duration_ms) }}）
           </option>
         </select>
-        <span class="hint">素材来自 GET /episodes/{id}/media?kind=audio。</span>
+        <span class="hint">本剧集上传的音频素材会列在这里。</span>
       </div>
       <!-- FR-052：挂载前先试听，避免配错曲子 -->
       <div v-if="trackForm.media_id" class="field">
@@ -1136,29 +1738,59 @@ function handleGateError(err: unknown): void {
 </template>
 
 <style scoped>
-.stage {
-  display: flex;
-  flex-direction: column;
-  gap: var(--gap);
-}
-.two-col {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--gap);
-  align-items: start;
-}
-@media (max-width: 1120px) {
-  .two-col {
-    grid-template-columns: 1fr;
-  }
-}
 .form-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 12px;
+  gap: var(--space-3);
 }
 .voice-list,
 .bind-list,
+.bgm-scope {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  padding-bottom: var(--space-2);
+}
+.bgm-scope-select {
+  /* 起止两个下拉并排放得下，「到」字不会被挤到下一行 */
+  width: auto;
+  flex: 1 1 150px;
+  min-width: 132px;
+  max-width: 232px;
+}
+.bgm-gen {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 168px;
+  gap: var(--gap);
+  align-items: start;
+  padding-bottom: var(--gap);
+  border-bottom: 1px dashed var(--line);
+}
+.bgm-prompt {
+  min-height: 64px;
+}
+.bgm-side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.track-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.track-prompt {
+  margin-top: 2px;
+  max-width: 100%;
+}
+@media (max-width: 760px) {
+  .bgm-gen {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
 .track-list,
 .cue-list {
   list-style: none;
@@ -1166,7 +1798,7 @@ function handleGateError(err: unknown): void {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
   max-height: 340px;
   overflow: auto;
 }
@@ -1175,8 +1807,8 @@ function handleGateError(err: unknown): void {
 .track-item {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 9px 10px;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-3);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--panel-2);
@@ -1187,13 +1819,13 @@ function handleGateError(err: unknown): void {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--space-1);
 }
 .voice-preview {
   width: 100%;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
 }
 .voice-preview audio {
   width: 100%;
@@ -1202,17 +1834,47 @@ function handleGateError(err: unknown): void {
 .bind-select {
   width: 190px;
 }
-.cue-item {
+.bind-controls {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 6px 9px;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+.speed-field {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.speed-field.disabled {
+  opacity: 0.5;
+}
+.speed-input {
+  width: 78px;
+  text-align: right;
+}
+/* 「旧版本」只做提示，别和状态徽章抢注意力 */
+.voice-legacy {
+  margin-left: var(--space-1);
+  opacity: 0.7;
+  font-weight: 400;
+}
+.cue-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-xs);
-  background: rgba(255, 255, 255, 0.025);
+  background: rgba(243, 237, 227, 0.025);
+}
+/* 字幕卡只有半栏宽，时间+文本挤一行会把文本压没：分成「信息行 + 文本行」 */
+.cue-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
 }
 .cue-item .mono {
   flex: 0 0 auto;
-  width: 132px;
 }
 .over {
   color: var(--danger);
@@ -1224,8 +1886,8 @@ function handleGateError(err: unknown): void {
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
-  gap: 8px;
-  padding: 7px 10px;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
   border: 1px solid var(--line-accent);
   border-radius: var(--radius-sm);
   background: var(--accent-soft);
@@ -1238,48 +1900,80 @@ function handleGateError(err: unknown): void {
 .cue-times {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: var(--space-2);
   flex: 0 0 auto;
 }
 .cue-ms {
   width: 76px;
   height: 26px;
   padding: 0 6px;
-  font-size: 12px;
+  font-size: var(--fs-12);
+}
+/* 只读时间：等宽数字 + 可点击微调，替代原来裸露的毫秒输入框 */
+.cue-time-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+  background: var(--panel-2);
+  color: var(--text-1);
+  font-family: var(--font-mono, monospace);
+  font-size: var(--fs-12);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+  white-space: nowrap;
+  cursor: pointer;
+  appearance: none;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+.cue-time-pill:hover {
+  border-color: var(--line-strong);
+  color: var(--text-0);
+}
+.cue-sec {
+  width: 68px;
+  height: 26px;
+  padding: 0 6px;
+  font-size: var(--fs-12);
 }
 .cue-text {
-  flex: 1;
-  height: 26px;
+  width: 100%;
+  height: 28px;
   padding: 0 7px;
-  font-size: 12px;
+  font-size: var(--fs-12);
+}
+.cue-save {
+  margin-left: auto;
 }
 
 /* FR-050：配音前置条件阻断提示 */
 .voice-block {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
   align-items: flex-start;
-  padding: 10px 12px;
+  padding: var(--space-3) var(--space-3);
   border: 1px solid var(--warn, #b45309);
   border-radius: 8px;
   background: color-mix(in srgb, var(--warn, #b45309) 8%, transparent);
 }
 .voice-block-head {
-  font-size: 13px;
+  font-size: var(--fs-13);
 }
 .voice-block-list {
   margin: 0;
   padding-left: 18px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  font-size: 12px;
+  gap: var(--space-1);
+  font-size: var(--fs-12);
 }
 .voice-block-list li {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-2);
   flex-wrap: wrap;
 }
 
@@ -1287,8 +1981,8 @@ function handleGateError(err: unknown): void {
 .degrade-block {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 10px 12px;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-3);
   border: 1px dashed var(--line-strong);
   border-radius: 8px;
 }
@@ -1296,9 +1990,9 @@ function handleGateError(err: unknown): void {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: var(--space-3);
   flex-wrap: wrap;
-  font-size: 13px;
+  font-size: var(--fs-13);
 }
 .hidden-file {
   display: none;

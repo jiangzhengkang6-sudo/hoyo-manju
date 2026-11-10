@@ -59,6 +59,37 @@ export const videoApi = {
   confirm: (shotId: string, mediaId: string) =>
     http.post<Job>(`/shots/${shotId}/video/confirm`, { media_id: mediaId }),
 
+  /**
+   * 用已上传的视频顶替该镜头，直接置为「片段已确认」。
+   *
+   * 给「供应商成功、本地拉取失败」这类情况兜底：片子已经花钱生成了，
+   * 从供应商控制台下载后传回来即可，不需要再生成一次。
+   */
+  manual: (shotId: string, mediaId: string) =>
+    http.post<{
+      shot_no: number
+      video_status: string
+      video_media_id: string
+      duration_ms?: number | null
+      warnings: string[]
+    }>(`/shots/${shotId}/video/manual`, { media_id: mediaId }),
+
+  /**
+   * 按供应商任务号补拉已生成的片段（不提交新任务、不产生新费用）。
+   *
+   * 上游成片只保留 24 小时，过期会返回明确提示「链接已过期，只能重新生成」。
+   */
+  fetchProvider: (shotId: string, taskId: string) =>
+    http.post<{
+      shot_no: number
+      video_status: string
+      video_media_id: string
+      duration_ms?: number | null
+      task_id: string
+      billed_cents: number
+      warnings: string[]
+    }>(`/shots/${shotId}/video/fetch-provider`, { task_id: taskId }),
+
   /** 跳过该镜视频，使用静帧或空白兜底。 */
   skip: (shotId: string, fallback: 'static_image' | 'blank', reason?: string) =>
     http.post<Job>(`/shots/${shotId}/video/skip`, { reason, fallback }),

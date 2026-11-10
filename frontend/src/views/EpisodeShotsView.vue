@@ -9,12 +9,14 @@ import { useEpisodeStore } from '@/stores/episode'
 import { useConfigStore } from '@/stores/config'
 import { useToastStore } from '@/stores/toast'
 import { reportError } from '@/api/client'
-import { jobsApi } from '@/api/jobs'
-import { fetchCandidates, shotsApi } from '@/api/shots'
+import { cancelJob as cancelJobRequest, jobsApi } from '@/api/jobs'
+import { fetchCandidates, shotsApi, suggestShotById, type ImageEstimate } from '@/api/shots'
 import { CAMERA_MOVEMENTS, COMPOSITIONS, scriptApi } from '@/api/story'
 import { formatDuration } from '@/utils/format'
+import { formatCents } from '@/api/cost'
 import { ApiError } from '@/api/errors'
 import GateCard from '@/components/GateCard.vue'
+import StageHead from '@/components/StageHead.vue'
 import ShotGrid from '@/components/ShotGrid.vue'
 import CandidatePicker from '@/components/CandidatePicker.vue'
 import JobInline from '@/components/JobInline.vue'
@@ -28,7 +30,14 @@ const config = useConfigStore()
 const toast = useToastStore()
 const { shots, workflow, pendingGate, jobSnapshots } = storeToRefs(store)
 
-const selectedNos = ref<number[]>([])
+/**
+ * 勾选状态由 store 共享：页面内的「生成分镜图」和底部批量操作栏必须用同一份，
+ * 否则底部栏会按「全部未确认镜头」生成，与用户勾选的不一致。
+ */
+const selectedNos = computed<number[]>({
+  get: () => store.selectedShotNos,
+  set: (next) => store.setSelectedShots(next),
+})
 const activeNo = ref<number | null>(null)
 const candidates = ref<ShotCandidate[]>([])
 const candidatesLoading = ref(false)
@@ -73,6 +82,44 @@ const draft = reactive<Required<Pick<ShotPatch, 'duration_ms' | 'composition' | 
 })
 
 const activeShot = computed(() => shots.value.find((s) => s.shot_no === activeNo.value) ?? null)
+
+/* ------------------------------------------------------------------ *
+ * 按大纲生成：AI 出草稿、人定稿（只填编辑区，不直接保存）
+ * ------------------------------------------------------------------ */
+const suggestOpen = ref(false)
+const suggestBusy = ref(false)
+const suggestInstruction = ref('')
+
+function openSuggest(): void {
+  if (!activeShot.value) return
+  suggestInstruction.value = ''
+  suggestOpen.value = true
+}
+
+async function runSuggest(): Promise<void> {
+  const shot = activeShot.value
+  if (!shot) return
+  suggestBusy.value = true
+  try {
+    const result = await suggestShotById(shot.id, suggestInstruction.value)
+    const s = result.suggestion
+    draft.duration_ms = s.duration_ms
+    draft.composition = s.composition
+    draft.camera_movement = s.camera_movement
+    draft.characters = s.characters.join('、')
+    draft.action = s.action
+    draft.emotion = s.emotion || draft.emotion
+    draft.image_prompt = s.image_prompt
+    draft.negative_prompt = s.negative_prompt
+    draft.narration = s.narration
+    suggestOpen.value = false
+    toast.success('已填入编辑区', `消耗 ${formatCents(result.cost_cents)}，确认后点「保存镜头」`)
+  } catch (err) {
+    reportError(err, '按大纲生成镜头')
+  } finally {
+    suggestBusy.value = false
+  }
+}
 
 /* ------------------------------------------------------------------ *
  * FR-030：分镜表格视图 + 台词编辑
@@ -206,6 +253,29 @@ onMounted(async () => {
   candidatesPerShot.value = config.candidateDefault
 })
 
+/**
+ * 分镜图生成成功的那一刻刷新分镜表与候选图。
+ *
+ * 之前只靠 SSE 的 `media.created` 触发 `refreshLive()`，而它只重取概览/工作流，
+ * **不重取分镜表**：结果就是图已经生成好了，卡片却一直写着「暂无素材」。
+ */
+watch(
+  () => jobs.value.map((job) => `${job.id}:${job.status}`).join('|'),
+  async (next, prev) => {
+    if (!prev) return
+    const before = new Set(prev.split('|'))
+    const succeeded = next
+      .split('|')
+      .some((item) => !before.has(item) && item.endsWith(':SUCCEEDED'))
+    if (!succeeded) return
+    await store.loadShots()
+    const shot = activeShot.value
+    if (shot) {
+      candidates.value = await fetchCandidates(shot.id).catch(() => [])
+    }
+  },
+)
+
 watch(
   () => config.candidateDefault,
   (value) => {
@@ -264,7 +334,7 @@ async function saveShot(): Promise<void> {
   const shot = activeShot.value
   if (!shot) return
   if (draft.duration_ms < config.shotMinMs || draft.duration_ms > config.shotMaxMs) {
-    toast.warn('时长超出限制', `允许范围 ${config.shotMinMs} ~ ${config.shotMaxMs} ms（来自 /config/limits）`)
+    toast.warn('时长超出限制', `允许范围 ${config.shotMinMs} ~ ${config.shotMaxMs} ms`)
     return
   }
   savingShot.value = true
@@ -307,16 +377,48 @@ function track(job: Job): void {
   store.trackJob(job)
 }
 
+/** 生成前的预估（张数 × 单价 + 配额影响），用于二次确认，避免一按就扣分。 */
+const estimateOpen = ref(false)
+const estimating = ref(false)
+const estimate = ref<ImageEstimate | null>(null)
+
 async function generateImages(): Promise<void> {
-  const nos = selectedNos.value.length ? selectedNos.value : activeNo.value ? [activeNo.value] : []
+  // 严格按勾选执行：不再回退到「当前打开的镜头」，避免用户没勾选却生成了别的一镜。
+  const nos = selectedNos.value
   if (!nos.length) {
-    toast.warn('请先选择镜头', '勾选需要生成分镜图的镜头')
+    toast.warn('请先勾选镜头', '在分镜表里勾选要生成的镜头（可点「选未确认」）')
     return
   }
   if (candidatesPerShot.value < 1 || candidatesPerShot.value > config.candidateMax) {
-    toast.warn('候选数超出限制', `允许 1 ~ ${config.candidateMax}（来自 /config/limits）`)
+    toast.warn('候选数超出限制', `允许 1 ~ ${config.candidateMax}`)
     return
   }
+  estimating.value = true
+  try {
+    const info = await shotsApi.estimateImages(store.episodeId ?? '', {
+      shot_nos: nos,
+      candidates_per_shot: candidatesPerShot.value,
+    })
+    if (info.can_generate === false) {
+      const detail = (info.blocking_problems ?? [])
+        .map((p) => `#${p.shot_no} ${p.message}`)
+        .join('；')
+      toast.error('有镜头还不能生成', detail || '请先补齐角色参考图')
+      return
+    }
+    estimate.value = info
+    estimateOpen.value = true
+  } catch {
+    /* api 层已提示 */
+  } finally {
+    estimating.value = false
+  }
+}
+
+async function submitGenerate(): Promise<void> {
+  const nos = selectedNos.value
+  if (!nos.length) return
+  estimateOpen.value = false
   busy.value = true
   try {
     const job = await shotsApi.generateImages(store.episodeId ?? '', {
@@ -324,7 +426,10 @@ async function generateImages(): Promise<void> {
       candidates_per_shot: candidatesPerShot.value,
     })
     track(job)
-    toast.info('分镜图生成任务已提交', `${nos.length} 个镜头 × ${candidatesPerShot.value} 张候选`)
+    toast.info(
+      '分镜图生成任务已提交',
+      `${nos.length} 个镜头 × ${candidatesPerShot.value} 张候选`,
+    )
   } catch {
     /* api 层已提示 */
   } finally {
@@ -436,8 +541,8 @@ async function retryJob(id: string): Promise<void> {
 
 async function cancelJob(id: string): Promise<void> {
   try {
-    const res = await jobsApi.cancel(id)
-    if (res.job) store.trackJob(res.job)
+    const job = await cancelJobRequest(id)
+    if (job) store.trackJob(job)
   } catch {
     /* api 层已提示 */
   }
@@ -489,6 +594,11 @@ function handleGateError(err: unknown): void {
 
 <template>
   <div class="stage">
+    <StageHead
+      index="03"
+      title="分镜画面"
+      description="逐镜确认主图。只有确认过的画面才会进入视频生成，避免花了钱却对不上剧本。"
+    />
     <GateCard
       :gate="pendingGate"
       :workflow="workflow"
@@ -524,8 +634,13 @@ function handleGateError(err: unknown): void {
             min="1"
             :max="config.candidateMax"
           />
-          <button type="button" class="btn btn-sm btn-primary" :disabled="busy" @click="generateImages">
-            生成分镜图
+          <button
+            type="button"
+            class="btn btn-sm btn-primary"
+            :disabled="busy || estimating"
+            @click="generateImages"
+          >
+            {{ estimating ? '预估中…' : `生成分镜图${selectedNos.length ? `（${selectedNos.length}）` : ''}` }}
           </button>
           <button type="button" class="btn btn-sm" :disabled="busy" @click="confirmBatch">
             批量确认
@@ -535,7 +650,7 @@ function handleGateError(err: unknown): void {
           </button>
         </div>
       </div>
-      <div class="card-body col" style="gap: 14px">
+      <div class="card-body col" style="gap: var(--space-4)">
         <div class="row-wrap">
           <button type="button" class="btn btn-sm btn-ghost" @click="selectAll">全选</button>
           <button type="button" class="btn btn-sm btn-ghost" @click="selectUnconfirmed">选未确认</button>
@@ -576,7 +691,7 @@ function handleGateError(err: unknown): void {
         <template v-else>
           <div v-if="dialogueDirty" class="dialogue-bar">
             <span class="tiny">有未保存的台词改动</span>
-            <span class="row" style="gap: 6px">
+            <span class="row" style="gap: var(--space-2)">
               <button
                 type="button"
                 class="btn btn-sm btn-primary"
@@ -674,7 +789,7 @@ function handleGateError(err: unknown): void {
                     </span>
                   </td>
                   <td class="col-op">
-                    <span class="row" style="gap: 4px">
+                    <span class="row" style="gap: var(--space-1)">
                       <button
                         type="button"
                         class="btn btn-sm btn-ghost"
@@ -713,9 +828,18 @@ function handleGateError(err: unknown): void {
             <span v-else class="badge badge-warn">待确认</span>
             <span v-if="activeShot.stale" class="badge badge-warn">下游过期</span>
           </div>
+          <button
+            type="button"
+            class="btn btn-sm btn-primary"
+            :disabled="suggestBusy"
+            title="根据大纲与前后镜头给这一镜写一版（只填编辑区，需手动保存）"
+            @click="openSuggest"
+          >
+            AI 按大纲生成
+          </button>
           <button type="button" class="btn btn-sm btn-ghost" @click="activeNo = null">收起</button>
         </div>
-        <div class="card-body col" style="gap: 14px">
+        <div class="card-body col" style="gap: var(--space-4)">
           <CandidatePicker
             :shot="activeShot"
             :candidates="candidates"
@@ -942,33 +1066,93 @@ function handleGateError(err: unknown): void {
         </button>
       </template>
     </ModalDialog>
+
+    <!-- 生成前确认：先看清楚要花多少，再决定生不生 -->
+    <ModalDialog
+      :open="estimateOpen"
+      title="确认生成分镜图"
+      :width="520"
+      @close="estimateOpen = false"
+    >
+      <template v-if="estimate">
+        <p class="small muted">
+          将为 <b class="mono">{{ estimate.shot_count }}</b> 个镜头各生成
+          <b class="mono">{{ estimate.candidates_per_shot }}</b> 张，共
+          <b class="mono">{{ estimate.image_count }}</b> 张图。
+        </p>
+        <div class="col" style="gap: var(--space-2); margin-top: 6px">
+          <div class="row-between">
+            <span class="tiny dim">供应商 / 模型</span>
+            <span class="mono tiny">{{ estimate.provider }} · {{ estimate.model }}</span>
+          </div>
+          <div class="row-between">
+            <span class="tiny dim">单价</span>
+            <span class="mono tiny">{{ formatCents(estimate.unit_price_cents) }} / 张</span>
+          </div>
+          <div class="row-between">
+            <span class="tiny dim">预计消耗</span>
+            <span class="mono">{{ formatCents(estimate.estimate_cents) }}</span>
+          </div>
+          <div class="row-between">
+            <span class="tiny dim">当前可用</span>
+            <span class="mono tiny">{{ formatCents(estimate.remaining_cents) }}</span>
+          </div>
+          <div class="row-between">
+            <span class="tiny dim">生成后余额</span>
+            <span class="mono tiny">{{ formatCents(estimate.quota_after_cents) }}</span>
+          </div>
+        </div>
+        <p v-if="estimate.quota_after_cents < 0" class="over tiny" style="margin-top: 8px">
+          配额不足，提交会被后端拒绝。请先调整配额或减少镜头/候选数。
+        </p>
+      </template>
+      <template #footer>
+        <button type="button" class="btn btn-ghost" @click="estimateOpen = false">取消</button>
+        <button type="button" class="btn btn-primary" :disabled="busy" @click="submitGenerate">
+          确认生成
+        </button>
+      </template>
+    </ModalDialog>
+
+    <!-- 单镜「按大纲生成」：只填编辑区，保存仍需手动点 -->
+    <ModalDialog
+      :open="suggestOpen"
+      :title="`按大纲生成 · 镜 #${activeShot ? String(activeShot.shot_no).padStart(3, '0') : ''}`"
+      :width="560"
+      @close="suggestOpen = false"
+    >
+      <p class="small muted">
+        会结合故事大纲、人物表与前后镜头，给这一镜写一版动作 / 台词 / 画面提示词。
+        生成结果只填进编辑区，确认无误后点「保存镜头」才会生效。
+      </p>
+      <div class="field">
+        <label class="label" for="sg-shot-inst">额外要求（可选）</label>
+        <textarea
+          id="sg-shot-inst"
+          v-model="suggestInstruction"
+          class="textarea"
+          rows="3"
+          placeholder="例如：这一镜更压抑，多用阴影；不要出现台词"
+        />
+      </div>
+      <template #footer>
+        <button type="button" class="btn btn-ghost" @click="suggestOpen = false">取消</button>
+        <button type="button" class="btn btn-primary" :disabled="suggestBusy" @click="runSuggest">
+          {{ suggestBusy ? '生成中…' : '生成并填入' }}
+        </button>
+      </template>
+    </ModalDialog>
   </div>
 </template>
 
 <style scoped>
-.stage {
-  display: flex;
-  flex-direction: column;
-  gap: var(--gap);
-}
-.two-col {
-  display: grid;
-  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
-  gap: var(--gap);
-  align-items: start;
-}
-@media (max-width: 1180px) {
-  .two-col {
-    grid-template-columns: 1fr;
-  }
-}
 .cand-input {
   width: 76px;
 }
 .form-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 12px;
+  gap: var(--space-3);
 }
 .status-list {
   list-style: none;
@@ -976,18 +1160,18 @@ function handleGateError(err: unknown): void {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-2);
   max-height: 340px;
   overflow: auto;
 }
 .status-item {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-2);
   border-radius: var(--radius-sm);
   border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.02);
+  background: rgba(243, 237, 227, 0.02);
   cursor: pointer;
   transition: all var(--dur) var(--ease);
 }
@@ -1002,7 +1186,7 @@ function handleGateError(err: unknown): void {
 /* FR-030 表格视图 */
 .view-switch {
   display: inline-flex;
-  gap: 3px;
+  gap: var(--space-1);
   margin-left: auto;
 }
 .dialogue-bar {
@@ -1010,8 +1194,8 @@ function handleGateError(err: unknown): void {
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
-  gap: 8px;
-  padding: 7px 10px;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
   border: 1px solid var(--line-accent);
   border-radius: var(--radius-sm);
   background: var(--accent-soft);
@@ -1025,22 +1209,22 @@ function handleGateError(err: unknown): void {
 .shot-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 12px;
+  font-size: var(--fs-12);
 }
 .shot-table th {
   position: sticky;
   top: 0;
   z-index: 1;
-  background: var(--bg);
+  background: var(--bg-1);
   text-align: left;
   font-weight: 600;
-  color: var(--dim);
-  padding: 7px 8px;
+  color: var(--text-2);
+  padding: var(--space-2) var(--space-2);
   border-bottom: 1px solid var(--line-strong);
   white-space: nowrap;
 }
 .shot-table td {
-  padding: 6px 8px;
+  padding: var(--space-2) var(--space-2);
   border-bottom: 1px solid var(--line);
   vertical-align: top;
 }
@@ -1080,24 +1264,24 @@ function handleGateError(err: unknown): void {
 .dlg-list {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
 }
 .dlg-row {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-1);
 }
 .dlg-char {
   width: 68px;
   height: 25px;
   padding: 0 5px;
-  font-size: 12px;
+  font-size: var(--fs-12);
 }
 .dlg-text {
   flex: 1;
   height: 25px;
   padding: 0 5px;
-  font-size: 12px;
+  font-size: var(--fs-12);
 }
 .dlg-del {
   height: 25px;
@@ -1107,6 +1291,6 @@ function handleGateError(err: unknown): void {
   align-self: flex-start;
   height: 24px;
   padding: 0 8px;
-  font-size: 11px;
+  font-size: var(--fs-11);
 }
 </style>

@@ -13,7 +13,11 @@ const { downloadFile, reportError } = vi.hoisted(() => ({
   reportError: vi.fn(),
 }))
 
-vi.mock('@/api/client', () => ({ downloadFile, reportError }))
+vi.mock('@/api/client', async (importOriginal) => {
+  // 只替换下载/上报，保留 apiUrl 等纯函数（媒体地址依赖它拼 /api/v1）
+  const actual = await importOriginal<typeof import('@/api/client')>()
+  return { ...actual, downloadFile, reportError }
+})
 
 import MediaThumb from '@/components/MediaThumb.vue'
 
@@ -42,7 +46,7 @@ describe('MediaThumb (FR-032)', () => {
     const wrapper = mountThumb()
     const img = wrapper.find('img')
     expect(img.exists()).toBe(true)
-    expect(img.attributes('src')).toBe(`/media/${MEDIA_ID}/content`)
+    expect(img.attributes('src')).toBe(`/api/v1/media/${MEDIA_ID}/content`)
     wrapper.unmount()
   })
 
@@ -59,7 +63,7 @@ describe('MediaThumb (FR-032)', () => {
     await wrapper.find('img').trigger('click')
     const box = lightbox()
     expect(box).not.toBeNull()
-    expect(box!.querySelector('img')?.getAttribute('src')).toBe(`/media/${MEDIA_ID}/content`)
+    expect(box!.querySelector('img')?.getAttribute('src')).toBe(`/api/v1/media/${MEDIA_ID}/content`)
 
     // 点背景（.lightbox 本身，不是里面的 img）
     await (box as HTMLElement).click()
@@ -197,6 +201,52 @@ describe('MediaThumb (FR-032)', () => {
     await wrapper.setProps({ mediaId: 'med_other' })
     expect(wrapper.find('img').exists()).toBe(true)
     expect(wrapper.text()).not.toContain('加载失败')
+    wrapper.unmount()
+  })
+})
+
+describe('MediaThumb 视频', () => {
+  beforeEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  it('视频地址带 /api/v1 前缀（少了会打到前端根路径，黑屏无法播放）', () => {
+    const wrapper = mount(MediaThumb, {
+      props: { mediaId: MEDIA_ID, kind: 'video' },
+      attachTo: document.body,
+    })
+    const video = wrapper.find('video')
+    expect(video.exists()).toBe(true)
+    expect(video.attributes('src')).toBe(`/api/v1/media/${MEDIA_ID}/content`)
+    wrapper.unmount()
+  })
+
+  it('列表里只给播放按钮，点开弹层才真正播', async () => {
+    const wrapper = mount(MediaThumb, {
+      props: { mediaId: MEDIA_ID, kind: 'video' },
+      attachTo: document.body,
+    })
+    expect(document.body.querySelector('.video-lightbox')).toBeNull()
+
+    await wrapper.find('.thumb-play').trigger('click')
+    const box = document.body.querySelector('.video-lightbox') as HTMLElement | null
+    expect(box).not.toBeNull()
+    const player = box!.querySelector('video')
+    expect(player?.getAttribute('src')).toBe(`/api/v1/media/${MEDIA_ID}/content`)
+    expect(player?.hasAttribute('controls')).toBe(true)
+
+    await box!.click()                       // 点背景关闭
+    expect(document.body.querySelector('.video-lightbox')).toBeNull()
+    wrapper.unmount()
+  })
+
+  it('视频加载失败时显示失败态', async () => {
+    const wrapper = mount(MediaThumb, {
+      props: { mediaId: MEDIA_ID, kind: 'video' },
+      attachTo: document.body,
+    })
+    await wrapper.find('video').trigger('error')
+    expect(wrapper.text()).toContain('加载失败')
     wrapper.unmount()
   })
 })

@@ -193,6 +193,7 @@ def start(
     *,
     source_text: str = "",
     shot_count: int | None = None,
+    reuse_script: bool = False,
 ) -> WorkflowRun:
     run = create_run(session, episode)
     state = _initial_state(session, run, episode)
@@ -200,6 +201,8 @@ def start(
         state["source_text"] = source_text
     if shot_count:
         state["shot_count"] = shot_count
+    # 复用已有剧本：`story_agent` 节点会跳过模型调用，直接接上当前剧本
+    state["reuse_script"] = bool(reuse_script)
     values, gate, checkpoint_id = _invoke(session, run, state, resume=False)
     return _apply_result(session, run, values, gate, checkpoint_id)
 

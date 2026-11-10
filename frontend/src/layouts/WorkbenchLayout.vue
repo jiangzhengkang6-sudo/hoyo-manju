@@ -17,8 +17,8 @@ import { useToastStore } from '@/stores/toast'
 import { STAGE_ROUTE, episodesApi, stageIndex, stageLabel } from '@/api/episodes'
 import { GATE_LABEL, GATE_ROUTE, gateLabel } from '@/api/workflow'
 import { formatCents } from '@/api/cost'
-import { isTerminalJobStatus, jobTypeLabel } from '@/api/jobs'
-import { shotsApi } from '@/api/shots'
+import { cancelJob as cancelJobRequest, isTerminalJobStatus, jobTypeLabel } from '@/api/jobs'
+import { shotsApi, type ImageEstimate } from '@/api/shots'
 import { storyApi, versionsApi } from '@/api/story'
 import { videoApi } from '@/api/video'
 import { audioApi } from '@/api/audio'
@@ -77,13 +77,31 @@ const {
 const sideCollapsed = ref(false)
 const railCollapsed = ref(false)
 const narrow = ref(false)
+/** 用户手动开合过右栏后，就不再让断点自动覆盖他的选择 */
+const railTouched = ref(false)
 
 let mediaQuery: MediaQueryList | null = null
+let wideQuery: MediaQueryList | null = null
 
 function onMediaChange(event: MediaQueryListEvent): void {
   narrow.value = event.matches
   sideCollapsed.value = event.matches
-  railCollapsed.value = event.matches
+  // 窄屏放不下两栏，必须收起（用户手动展开仍可临时覆盖）
+  if (event.matches) railCollapsed.value = true
+}
+
+function onWideChange(event: MediaQueryListEvent): void {
+  if (!railTouched.value) railCollapsed.value = !event.matches
+}
+
+function toggleRail(): void {
+  railTouched.value = true
+  railCollapsed.value = !railCollapsed.value
+}
+
+function collapseRail(): void {
+  railTouched.value = true
+  railCollapsed.value = true
 }
 
 /* ------------------------------------------------------------------ *
@@ -92,8 +110,11 @@ function onMediaChange(event: MediaQueryListEvent): void {
 
 /** 顶部条实际高度，供左右侧栏 sticky 定位使用（标题换行时也能对齐）。 */
 const topRef = ref<HTMLElement | null>(null)
-const topHeight = ref(60)
+const topHeight = ref(64)
+const bottomRef = ref<HTMLElement | null>(null)
+const bottomHeight = ref(112)
 let resizeObserver: ResizeObserver | null = null
+let bottomObserver: ResizeObserver | null = null
 
 const copying = ref(false)
 const showCopy = ref(false)
@@ -453,11 +474,49 @@ function jobTone(job: Job): string {
   return ''
 }
 
+/** 后台补拉回来的任务：状态还是 FAILED，但产物已经拿到了。 */
+function jobRecovered(job: Job): boolean {
+  return Boolean((job.result_ref as Record<string, unknown> | null)?.recovered)
+}
+
+/**
+ * 任务卡上的费用说明。
+ *
+ * 「失败了还扣钱」是最容易让人起疑的地方，所以这里直接把结果写出来：
+ * 失败/取消的任务预留已全额退回，一个词都不用猜；成功的才显示实际花费。
+ */
+function jobCostNote(job: Job): string {
+  if (!isTerminalJobStatus(job.status)) return ''
+  if (job.status === 'SUCCEEDED') {
+    const cents = job.cost_settled_cents ?? 0
+    return cents > 0 ? `花费 ${formatCents(cents)}` : ''
+  }
+  if (job.status === 'FAILED' || job.status === 'EXPIRED' || job.status === 'CANCELLED') {
+    // 后台已经补拉回来了：钱确实花了，别再显示「未扣费」
+    if (jobRecovered(job)) {
+      const cents = job.cost_settled_cents ?? 0
+      return cents > 0 ? `已自动补回 · 花费 ${formatCents(cents)}` : '已自动补回'
+    }
+    return '未扣费 · 预留已退回'
+  }
+  return ''
+}
+
 function trackJob(job: Job | null | undefined): void {
   if (!job?.id) return
   store.trackJob(job)
   if (!episodeJobs.value.some((item) => item.id === job.id)) {
     episodeJobs.value = [job, ...episodeJobs.value]
+  }
+}
+
+/** 底栏任务条上的「停止」：排队中立即取消，执行中在当前这一张/一条之后停。 */
+async function stopJob(job: Job): Promise<void> {
+  try {
+    const updated = await cancelJobRequest(job.id)
+    if (updated) trackJob(updated)
+  } catch {
+    /* api 层已提示 */
   }
 }
 
@@ -482,13 +541,39 @@ const videoPendingShotNos = computed(() =>
   shots.value.filter((shot) => shot.confirmed_media_id && !shot.video_media_id).map((s) => s.shot_no),
 )
 
-/** 分镜阶段：批量生成画面（复用 `POST /episodes/{id}/shots/generate-images`）。 */
+/**
+ * 分镜阶段：批量生成画面（复用 `POST /episodes/{id}/shots/generate-images`）。
+ *
+ * 只生成**用户勾选**的镜头：勾选状态存在 episode store 里，与分镜页表格共享。
+ * 之前这里取的是「全部未确认镜头」，于是用户只勾了 1 个，一点却生成 6 个。
+ */
+/** 生成前的花费确认：先看张数×单价，避免一按就扣分。 */
+const imageEstimate = ref<ImageEstimate | null>(null)
+const imageEstimateOpen = ref(false)
+
 async function generateAllImages(): Promise<void> {
-  const nos = unconfirmedShotNos.value
+  const nos = store.selectedShotNos
   if (!nos.length) {
-    toast.info('没有待生成画面的镜头', '所有镜头都已确认主图')
+    toast.warn('请先勾选镜头', '在分镜表里勾选要生成的镜头，再点这里')
     return
   }
+  const info = await shotsApi.estimateImages(props.episodeId, {
+    shot_nos: nos,
+    candidates_per_shot: config.candidateDefault,
+  })
+  if (info.can_generate === false) {
+    const detail = (info.blocking_problems ?? []).map((p) => `#${p.shot_no} ${p.message}`).join('；')
+    toast.error('有镜头还不能生成', detail || '请先补齐角色参考图')
+    return
+  }
+  imageEstimate.value = info
+  imageEstimateOpen.value = true
+}
+
+async function confirmGenerateImages(): Promise<void> {
+  const nos = store.selectedShotNos
+  if (!nos.length) return
+  imageEstimateOpen.value = false
   const job = await shotsApi.generateImages(props.episodeId, {
     shot_nos: nos,
     candidates_per_shot: config.candidateDefault,
@@ -619,10 +704,9 @@ const stageActions = computed<StageAction[]>(() => {
       return [
         {
           key: 'gen-images',
-          label: `生成画面${unconfirmedShotNos.value.length ? `（${unconfirmedShotNos.value.length}）` : ''}`,
-          title: '为未确认的镜头批量生成候选图',
+          label: `生成画面${store.selectedShotNos.length ? `（${store.selectedShotNos.length}）` : ''}`,
+          title: '为**已勾选**的镜头生成候选图（先在分镜表里勾选）',
           primary: true,
-          disabled: !unconfirmedShotNos.value.length,
           run: () => void runBatch(generateAllImages),
         },
         {
@@ -731,14 +815,26 @@ onMounted(() => {
     mediaQuery = window.matchMedia('(max-width: 1180px)')
     narrow.value = mediaQuery.matches
     sideCollapsed.value = mediaQuery.matches
-    railCollapsed.value = mediaQuery.matches
     mediaQuery.addEventListener('change', onMediaChange)
+
+    // 右栏是「建议 / 错误 / 版本日志」这类参考信息：窄于 1560 时先收起来，
+    // 把宽度让给真正在编辑的分镜与画面。
+    wideQuery = window.matchMedia('(min-width: 1560px)')
+    railCollapsed.value = mediaQuery.matches || !wideQuery.matches
+    wideQuery.addEventListener('change', onWideChange)
   }
   if (topRef.value && typeof ResizeObserver !== 'undefined') {
     resizeObserver = new ResizeObserver(() => {
-      topHeight.value = topRef.value?.offsetHeight ?? 60
+      topHeight.value = topRef.value?.offsetHeight ?? 64
     })
     resizeObserver.observe(topRef.value)
+  }
+  // 底栏是 sticky 的，会盖住最后一段内容；这里把真实高度同步给内容区留白
+  if (bottomRef.value && typeof ResizeObserver !== 'undefined') {
+    bottomObserver = new ResizeObserver(() => {
+      bottomHeight.value = bottomRef.value?.offsetHeight ?? 112
+    })
+    bottomObserver.observe(bottomRef.value)
   }
 })
 
@@ -764,7 +860,9 @@ watch(
 onBeforeUnmount(() => {
   store.stopLive()
   mediaQuery?.removeEventListener('change', onMediaChange)
+  wideQuery?.removeEventListener('change', onWideChange)
   resizeObserver?.disconnect()
+  bottomObserver?.disconnect()
 })
 
 function openGate(): void {
@@ -797,139 +895,149 @@ async function submitCopy(): Promise<void> {
   <div
     class="workbench"
     :class="{ 'side-collapsed': sideCollapsed, 'rail-collapsed': railCollapsed, narrow }"
-    :style="{ '--wb-top-h': `${topHeight}px` }"
+    :style="{ '--wb-top-h': `${topHeight}px`, '--wb-bottom-h': `${bottomHeight}px` }"
   >
-    <!-- ============ 顶部区：剧集名称 / 状态 / 总进度 / 累计成本 / 保存状态 ============ -->
+    <!-- ============ 顶部区：第一行 = 身份与动作，第二行 = 元信息与指标 ============ -->
     <header ref="topRef" class="wb-top">
-      <div class="wb-top-left">
-        <button
-          type="button"
-          class="btn btn-sm btn-ghost wb-toggle"
-          :aria-pressed="!sideCollapsed"
-          title="显示或隐藏左侧阶段导航"
-          @click="sideCollapsed = !sideCollapsed"
-        >
-          ☰ 阶段
-        </button>
-        <RouterLink
-          v-if="episode?.project_id"
-          :to="{ name: 'project-detail', params: { projectId: episode?.project_id } }"
-          class="wb-back"
-          title="返回项目"
-        >
-          ←
-        </RouterLink>
-        <div class="wb-title-wrap">
-          <div class="wb-title-row">
-            <h1 class="title-lg ellipsis">
-              {{ episode?.title ?? '加载中…' }}
-            </h1>
-            <span v-if="episode?.episode_no" class="badge mono">EP{{ String(episode.episode_no).padStart(2, '0') }}</span>
-            <span class="badge" :class="`badge-${stageBadgeTone}`">{{ stageLabel(episode?.stage) }}</span>
-            <span v-if="pendingGate" class="badge badge-warn badge-dot">{{ gateLabel(pendingGate) }}</span>
-            <span v-if="staleFlags.length" class="badge badge-warn" :title="staleFlags.join('、')">
-              {{ staleFlags.length }} 项下游过期
-            </span>
-            <!-- §10.1：受影响资源只标记不删除，给出重新生成入口 -->
-            <RouterLink
-              v-if="staleShots"
-              class="badge badge-warn badge-link"
-              :to="`/episodes/${episode?.id}/shots`"
-              :title="staleReasons.join('、')"
-            >
-              {{ staleShots }} 镜待更新
-            </RouterLink>
+      <div class="wb-top-row">
+        <div class="wb-top-left">
+          <button
+            type="button"
+            class="btn btn-sm btn-ghost wb-toggle"
+            :aria-pressed="!sideCollapsed"
+            title="显示或隐藏左侧阶段导航"
+            @click="sideCollapsed = !sideCollapsed"
+          >
+            ☰<span class="wb-toggle-text"> 阶段</span>
+          </button>
+          <RouterLink
+            v-if="episode?.project_id"
+            :to="{ name: 'project-detail', params: { projectId: episode?.project_id } }"
+            class="wb-back"
+            title="返回项目"
+          >
+            ←
+          </RouterLink>
+          <div class="wb-title-wrap">
+            <div class="wb-title-row">
+              <h1 class="title-lg ellipsis">
+                {{ episode?.title ?? '加载中…' }}
+              </h1>
+              <span v-if="episode?.episode_no" class="badge mono">
+                EP{{ String(episode.episode_no).padStart(2, '0') }}
+              </span>
+              <span class="badge" :class="`badge-${stageBadgeTone}`">{{ stageLabel(episode?.stage) }}</span>
+              <span v-if="pendingGate" class="badge badge-warn badge-dot">{{ gateLabel(pendingGate) }}</span>
+              <span v-if="staleFlags.length" class="badge badge-warn" :title="staleFlags.join('、')">
+                {{ staleFlags.length }} 项下游过期
+              </span>
+              <!-- §10.1：受影响资源只标记不删除，给出重新生成入口 -->
+              <RouterLink
+                v-if="staleShots"
+                class="badge badge-warn badge-link"
+                :to="`/episodes/${episode?.id}/shots`"
+                :title="staleReasons.join('、')"
+              >
+                {{ staleShots }} 镜待更新
+              </RouterLink>
+            </div>
+            <div v-if="episode?.blocked_reason" class="wb-blocked small">
+              已阻断：{{ episode.blocked_reason }}
+              <span v-if="episode?.stage_before_block" class="dim">
+                （解除后回到 {{ stageLabel(episode.stage_before_block) }}）
+              </span>
+            </div>
           </div>
-          <div v-if="episode?.blocked_reason" class="wb-blocked small">
-            已阻断：{{ episode.blocked_reason }}
-            <span v-if="episode?.stage_before_block" class="dim">
-              （解除后回到 {{ stageLabel(episode.stage_before_block) }}）
-            </span>
-          </div>
-          <div class="wb-sub tiny dim mono">
-            <span>{{ episode?.id }}</span>
-            <span v-if="episode?.target_duration_ms">
-              目标 {{ (episode.target_duration_ms / 1000).toFixed(0) }}s
-            </span>
-            <span v-if="shotCount">分镜 {{ confirmedShotCount }}/{{ shotCount }} 已确认</span>
-            <span v-if="totalDurationMs">总时长 {{ (totalDurationMs / 1000).toFixed(1) }}s</span>
-          </div>
+        </div>
+
+        <div class="wb-top-actions">
+          <button
+            v-if="!workflow"
+            type="button"
+            class="btn btn-sm btn-primary"
+            :disabled="starting || loading"
+            @click="startWorkflow"
+          >
+            {{ starting ? '启动中…' : '启动工作流' }}
+          </button>
+          <button
+            v-if="pendingGate"
+            type="button"
+            class="btn btn-sm btn-primary"
+            @click="openGate"
+          >
+            去确认
+          </button>
+          <button type="button" class="btn btn-sm btn-ghost" @click="showCopy = true">复制剧集</button>
+          <button
+            type="button"
+            class="btn btn-sm btn-ghost"
+            :disabled="store.refreshing"
+            @click="store.refreshAll()"
+          >
+            刷新
+          </button>
+          <button
+            type="button"
+            class="btn btn-sm btn-ghost wb-toggle"
+            :aria-pressed="!railCollapsed"
+            title="显示或隐藏右侧智能体面板"
+            @click="toggleRail"
+          >
+            <span class="wb-toggle-text">建议</span> ☷
+          </button>
         </div>
       </div>
 
-      <div class="wb-top-right">
-        <!-- 阶段进度 / 累计成本 / 保存状态（PRD §5.2 顶部五项） -->
-        <div class="wb-stats">
-          <div class="wb-stat" title="已推进的工作台阶段数 / 总阶段数">
-            <span class="wb-stat-label">阶段</span>
-            <span class="wb-stat-value mono">{{ stageProgressLabel }}</span>
-          </div>
-          <div class="wb-stat" title="本剧集累计成本（分 → 元）">
-            <span class="wb-stat-label">累计成本</span>
-            <span class="wb-stat-value mono">{{ totalCostLabel }}</span>
-          </div>
-          <div class="wb-stat" :title="saveTitle">
-            <span class="wb-stat-label">保存状态</span>
-            <span class="badge badge-dot" :class="`badge-${saveTone}`">{{ saveLabel }}</span>
-          </div>
+      <div class="wb-top-meta">
+        <div class="wb-sub tiny mono dim">
+          <span class="wb-id" :title="episode?.id">剧集 {{ episode?.episode_no ?? '—' }}</span>
+          <span v-if="episode?.target_duration_ms">
+            目标 {{ (episode.target_duration_ms / 1000).toFixed(0) }}s
+          </span>
+          <span v-if="shotCount">分镜 {{ confirmedShotCount }}/{{ shotCount }}</span>
+          <span v-if="totalDurationMs">时长 {{ (totalDurationMs / 1000).toFixed(1) }}s</span>
         </div>
 
-        <span class="badge badge-dot" :class="`badge-${sseTone}`" :title="`事件流状态：${sseLabel}`">
-          {{ sseLabel }}
-        </span>
-        <button
-          v-if="!workflow"
-          type="button"
-          class="btn btn-sm btn-primary"
-          :disabled="starting || loading"
-          @click="startWorkflow"
-        >
-          {{ starting ? '启动中…' : '启动工作流' }}
-        </button>
-        <button
-          v-if="pendingGate"
-          type="button"
-          class="btn btn-sm btn-primary"
-          @click="openGate"
-        >
-          去确认
-        </button>
-        <button type="button" class="btn btn-sm btn-ghost" @click="showCopy = true">复制剧集</button>
-        <button
-          type="button"
-          class="btn btn-sm btn-ghost"
-          :disabled="store.refreshing"
-          @click="store.refreshAll()"
-        >
-          刷新
-        </button>
-        <button
-          type="button"
-          class="btn btn-sm btn-ghost wb-toggle"
-          :aria-pressed="!railCollapsed"
-          title="显示或隐藏右侧智能体面板"
-          @click="railCollapsed = !railCollapsed"
-        >
-          建议 ☷
-        </button>
+        <!-- 总进度：本集时长 / 上限 -->
+        <div v-if="durationRatio > 0" class="wb-duration">
+          <span class="tiny dim nowrap">进度</span>
+          <div class="progress">
+            <div
+              class="progress-bar"
+              :class="{ warn: durationRatio > 92 }"
+              :style="{ width: `${durationRatio}%` }"
+            />
+          </div>
+          <span class="tiny dim-2 mono nowrap">
+            {{ durationRatio.toFixed(0) }}% · {{ (totalDurationMs / 1000).toFixed(1) }}s /
+            {{ (config.episodeMaxMs / 1000).toFixed(0) }}s 上限
+          </span>
+        </div>
+
+        <div class="wb-top-right">
+          <!-- 阶段进度 / 累计成本 / 保存状态（PRD §5.2 顶部五项） -->
+          <div class="wb-stats">
+            <div class="wb-stat" title="已推进的工作台阶段数 / 总阶段数">
+              <span class="wb-stat-label">阶段</span>
+              <span class="wb-stat-value num">{{ stageProgressLabel }}</span>
+            </div>
+            <div class="wb-stat" title="本剧集累计成本（分 → 元）">
+              <span class="wb-stat-label">累计成本</span>
+              <span class="wb-stat-value num">{{ totalCostLabel }}</span>
+            </div>
+            <div class="wb-stat" :title="saveTitle">
+              <span class="wb-stat-label">保存</span>
+              <span class="badge badge-dot" :class="`badge-${saveTone}`">{{ saveLabel }}</span>
+            </div>
+          </div>
+
+          <span class="badge badge-dot" :class="`badge-${sseTone}`" :title="`事件流状态：${sseLabel}`">
+            {{ sseLabel }}
+          </span>
+        </div>
       </div>
     </header>
-
-    <!-- 总进度：本集时长 / 上限 -->
-    <div v-if="durationRatio > 0" class="wb-duration">
-      <span class="tiny dim nowrap">总进度</span>
-      <div class="progress">
-        <div
-          class="progress-bar"
-          :class="{ warn: durationRatio > 92 }"
-          :style="{ width: `${durationRatio}%` }"
-        />
-      </div>
-      <span class="tiny dim-2 mono nowrap">
-        {{ durationRatio.toFixed(0) }}% · {{ (totalDurationMs / 1000).toFixed(1) }}s /
-        {{ (config.episodeMaxMs / 1000).toFixed(0) }}s 上限
-      </span>
-    </div>
 
     <!-- ============ 中部区（含左侧栏与右侧栏） ============ -->
     <div class="wb-main">
@@ -961,7 +1069,9 @@ async function submitCopy(): Promise<void> {
                 stale: staleStageKey === stage.key,
               }"
             >
-              <span class="stage-icon" aria-hidden="true">{{ stage.icon }}</span>
+              <span class="stage-no mono" aria-hidden="true">
+                {{ String(STAGES.indexOf(stage) + 1).padStart(2, '0') }}
+              </span>
               <span class="stage-label ellipsis">{{ stage.label }}</span>
               <span v-if="stageDone(stage)" class="stage-tick" title="该阶段已推进">✓</span>
               <span
@@ -1056,7 +1166,7 @@ async function submitCopy(): Promise<void> {
               type="button"
               class="btn btn-sm btn-ghost"
               title="收起右侧栏"
-              @click="railCollapsed = true"
+              @click="collapseRail"
             >
               »
             </button>
@@ -1090,7 +1200,7 @@ async function submitCopy(): Promise<void> {
                   <p class="small pre-wrap">{{ item.message || '（该节点未写入消息）' }}</p>
                 </article>
                 <p class="tiny dim-2">
-                  来源：<span class="mono">GET /episodes/{id}/workflow/logs</span>
+                  来源：工作流节点日志
                   <template v-if="suggestionNodeLabel"> · 节点「{{ suggestionNodeLabel }}」</template>
                 </p>
               </template>
@@ -1244,7 +1354,7 @@ async function submitCopy(): Promise<void> {
     </div>
 
     <!-- ============ 底部区：任务进度 / 批量操作 / 下一步 ============ -->
-    <footer class="wb-bottom">
+    <footer ref="bottomRef" class="wb-bottom">
       <section class="wb-bottom-col">
         <div class="row-between">
           <span class="section-title">任务进度</span>
@@ -1269,6 +1379,23 @@ async function submitCopy(): Promise<void> {
               <span class="ellipsis">{{ jobTypeLabel(job.type) }}</span>
               <span class="mono">{{ formatDateTime(job.created_at) }}</span>
             </div>
+            <span v-if="jobCostNote(job)" class="job-cost tiny">
+              {{ jobCostNote(job) }}
+            </span>
+            <button
+              v-if="!isTerminalJobStatus(job.status)"
+              type="button"
+              class="btn btn-sm btn-ghost job-chip-stop"
+              :disabled="job.status === 'CANCELLING'"
+              :title="
+                job.status === 'CANCELLING'
+                  ? '正在停止：当前这一张/一条跑完就结束'
+                  : '已提交的这一张会跑完（照常计费），之后不再继续'
+              "
+              @click.stop="stopJob(job)"
+            >
+              {{ job.status === 'CANCELLING' ? '停止中…' : '停止' }}
+            </button>
           </div>
         </div>
         <p v-else class="tiny dim">本剧集暂无任务记录。</p>
@@ -1315,6 +1442,35 @@ async function submitCopy(): Promise<void> {
       </section>
     </footer>
 
+    <ModalDialog
+      :open="imageEstimateOpen"
+      title="确认生成分镜图"
+      :width="480"
+      @close="imageEstimateOpen = false"
+    >
+      <template v-if="imageEstimate">
+        <p class="small muted">
+          将为 <b class="mono">{{ imageEstimate.shot_count }}</b> 个镜头各生成
+          <b class="mono">{{ imageEstimate.candidates_per_shot }}</b> 张，共
+          <b class="mono">{{ imageEstimate.image_count }}</b> 张图。
+        </p>
+        <p class="small">
+          预计消耗 <b class="mono">{{ formatCents(imageEstimate.estimate_cents) }}</b>
+          （单价 {{ formatCents(imageEstimate.unit_price_cents) }} / 张，
+          {{ imageEstimate.provider }}）。
+        </p>
+        <p class="tiny dim">
+          生成后余额 {{ formatCents(imageEstimate.quota_after_cents) }}
+        </p>
+      </template>
+      <template #footer>
+        <button type="button" class="btn btn-ghost" @click="imageEstimateOpen = false">取消</button>
+        <button type="button" class="btn btn-primary" @click="confirmGenerateImages">
+          确认生成
+        </button>
+      </template>
+    </ModalDialog>
+
     <ModalDialog :open="showCopy" title="复制剧集" :width="460" @close="showCopy = false">
       <div class="field">
         <label class="label" for="copy-title">新剧集标题（留空则自动命名）</label>
@@ -1342,8 +1498,8 @@ async function submitCopy(): Promise<void> {
  * ------------------------------------------------------------------ */
 
 .workbench {
-  --wb-left-w: 244px;
-  --wb-right-w: 328px;
+  --wb-left-w: 216px;
+  --wb-right-w: 300px;
   display: flex;
   flex-direction: column;
   min-height: 100%;
@@ -1377,7 +1533,7 @@ async function submitCopy(): Promise<void> {
 .wb-left,
 .wb-right {
   min-width: 0;
-  background: rgba(255, 255, 255, 0.012);
+  background: rgba(243, 237, 227, 0.012);
 }
 .wb-left {
   border-right: 1px solid var(--line);
@@ -1387,41 +1543,74 @@ async function submitCopy(): Promise<void> {
 }
 
 /* 侧栏内部粘性滚动：顶部条以下保持可见 */
+.wb-right .card-head {
+  min-height: 40px;
+  padding: var(--space-2) var(--space-3);
+}
+.wb-right .card-body {
+  padding: var(--space-3);
+}
+.wb-right .card + .card {
+  margin-top: 0;
+}
+/* 右栏很窄，空态不必铺满一大块：收紧内边距、去掉装饰图标 */
+.wb-right .empty {
+  padding: var(--space-3) var(--space-2);
+  gap: var(--space-1);
+  border-style: solid;
+  background: transparent;
+}
+.wb-right .empty-icon {
+  display: none;
+}
+.wb-right .empty-desc {
+  font-size: var(--fs-11);
+  max-width: none;
+  line-height: 1.6;
+}
+/* 版本记录的「查看差异」不该占满整行 */
+.wb-right .version-item .btn {
+  align-self: flex-start;
+  height: 24px;
+  padding: 0 8px;
+}
 .wb-rail-inner {
   position: sticky;
   top: var(--wb-top-h, 60px);
-  max-height: calc(100vh - var(--wb-top-h, 60px));
+  max-height: calc(100vh - var(--wb-top-h, 64px) - var(--wb-bottom-h, 112px));
   overflow: auto;
-  padding: 14px;
+  padding: var(--space-4);
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-3);
 }
 .wb-rail-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-2);
 }
 .wb-rail-note {
-  padding: 7px 9px;
+  padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-sm);
   border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.02);
+  background: rgba(243, 237, 227, 0.02);
 }
 .wb-rail-note.danger {
-  border-color: rgba(248, 113, 113, 0.32);
+  border-color: rgba(224, 122, 106, 0.32);
   background: var(--danger-soft);
   color: var(--danger);
 }
 .wb-rail-note.warn {
-  border-color: rgba(251, 191, 36, 0.32);
+  border-color: rgba(232, 203, 109, 0.32);
   background: var(--warn-soft);
   color: var(--warn);
 }
 
 .wb-center {
-  padding: 20px;
+  container-type: inline-size;
+  /* 底栏是 sticky 的，最后一段内容要能滚到它上面去 */
+  padding: var(--space-5) var(--space-5) calc(var(--wb-bottom-h, 112px) + var(--space-4));
   display: flex;
   flex-direction: column;
   gap: var(--gap);
@@ -1437,19 +1626,28 @@ async function submitCopy(): Promise<void> {
   top: 0;
   z-index: 20;
   display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-5) 6px;
+  min-height: var(--topbar-h);
+  background: rgba(18, 17, 16, 0.92);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--line);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.4);
+}
+
+/* 第一行：身份（标题 + 状态徽标）与动作按钮，两端对齐 */
+.wb-top-row {
+  display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 10px 20px;
-  min-height: var(--topbar-h);
-  background: rgba(18, 21, 28, 0.9);
-  backdrop-filter: blur(10px);
-  border-bottom: 1px solid var(--line);
+  gap: var(--space-4);
+  min-width: 0;
 }
 .wb-top-left {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-3);
   min-width: 0;
 }
 .wb-back {
@@ -1461,7 +1659,10 @@ async function submitCopy(): Promise<void> {
   border: 1px solid var(--line);
   color: var(--text-1);
   flex: 0 0 auto;
-  transition: all var(--dur) var(--ease);
+  transition:
+    color var(--dur) var(--ease),
+    border-color var(--dur) var(--ease),
+    background var(--dur) var(--ease);
 }
 .wb-back:hover {
   color: var(--text-0);
@@ -1474,77 +1675,119 @@ async function submitCopy(): Promise<void> {
 .wb-title-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   min-width: 0;
+  flex-wrap: wrap;
 }
 .wb-title-row h1 {
-  max-width: 340px;
+  max-width: 320px;
+  margin-right: 2px;
+}
+.wb-blocked {
+  margin-top: 3px;
+  color: var(--danger);
+}
+
+/* 动作区：主按钮在前，弱操作在后，间距一致 */
+.wb-top-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 0 0 auto;
+}
+
+/* 第二行：等宽元信息 + 进度 + 指标，形成一条「仪表带」 */
+.wb-top-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  min-width: 0;
+  padding-top: 6px;
+  border-top: 1px dashed var(--line);
+  flex-wrap: wrap;
 }
 .wb-sub {
   display: flex;
-  gap: 14px;
+  align-items: center;
+  gap: var(--space-3);
   flex-wrap: wrap;
-  margin-top: 1px;
+  min-width: 0;
 }
-/* §10.1：受影响资源入口 —— 看起来是徽标，实际可点进分镜页处理 */
-.badge-link {
-  cursor: pointer;
-  text-decoration: none;
-  transition: opacity 0.15s ease;
+.wb-sub .wb-id {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-3);
 }
-.badge-link:hover {
-  opacity: 0.75;
+/* 顶部区里的元信息用分隔点，避免一串数字糊在一起 */
+.wb-sub > span + span::before {
+  content: '·';
+  margin-right: 12px;
+  color: var(--text-3);
 }
-.wb-blocked {
-  margin-top: 4px;
-  color: var(--danger, #c0392b);
-}
+
 .wb-top-right {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-3);
   flex-wrap: wrap;
   justify-content: flex-end;
+  margin-left: auto;
 }
 
-/* 顶部三项关键指标 */
+/* 顶部三项关键指标：等宽数字，标签在上、值在下 */
 .wb-stats {
   display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 4px 12px;
+  align-items: stretch;
+  gap: 0;
+  padding: 0;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  background: rgba(255, 255, 255, 0.02);
+  background: rgba(243, 237, 227, 0.02);
+  overflow: hidden;
 }
 .wb-stat {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 0;
+  padding: var(--space-1) var(--space-3);
   min-width: 0;
+  border-left: 1px solid var(--line);
+}
+.wb-stat:first-child {
+  border-left: 0;
 }
 .wb-stat-label {
-  font-size: 10.5px;
-  letter-spacing: 0.08em;
+  font-size: var(--fs-11);
+  letter-spacing: 0.06em;
   color: var(--text-3);
+  line-height: 1.4;
 }
 .wb-stat-value {
-  font-size: 13px;
-  font-weight: 620;
+  font-size: var(--fs-13);
+  font-weight: 600;
   color: var(--text-0);
   white-space: nowrap;
+  line-height: 1.4;
+}
+.wb-stat .badge {
+  height: 18px;
+  padding: 0 6px;
+  font-size: var(--fs-11);
 }
 .wb-toggle {
   flex: 0 0 auto;
 }
 
+/* 进度：并入仪表带，不再单独占一行 */
 .wb-duration {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 6px 20px;
-  border-bottom: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.012);
+  gap: var(--space-2);
+  flex: 1 1 220px;
+  max-width: 360px;
+  min-width: 160px;
 }
 .wb-duration .progress {
   flex: 1 1 auto;
@@ -1555,62 +1798,96 @@ async function submitCopy(): Promise<void> {
  * ------------------------------------------------------------------ */
 
 .wb-stages {
+  position: relative;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: var(--space-1);
 }
+/* 六个阶段是一条流水线：用编号承担顺序感，不再堆图标 */
 .stage-tab {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 7px 9px;
+  gap: var(--space-3);
+  height: 34px;
+  padding: 0 8px;
   border-radius: var(--radius-sm);
-  border: 1px solid transparent;
-  font-size: 13px;
+  font-size: var(--fs-13);
   font-weight: 550;
   color: var(--text-2);
-  transition: all var(--dur) var(--ease);
+  transition:
+    background var(--dur) var(--ease),
+    color var(--dur) var(--ease);
 }
 .stage-tab:hover {
   color: var(--text-0);
   background: var(--neutral-soft);
 }
+.stage-no {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--line);
+  background: var(--bg-1);
+  font-size: var(--fs-11);
+  letter-spacing: 0.02em;
+  color: var(--text-3);
+  flex: 0 0 auto;
+  transition:
+    color var(--dur) var(--ease),
+    border-color var(--dur) var(--ease),
+    background var(--dur) var(--ease);
+}
+.stage-tab:hover .stage-no {
+  color: var(--text-1);
+  border-color: var(--line-strong);
+}
 .stage-tab.active {
   color: var(--text-0);
   background: var(--accent-soft);
-  border-color: var(--line-accent);
+}
+.stage-tab.active .stage-no {
+  color: var(--accent-ink);
+  background: var(--accent-grad);
+  border-color: transparent;
+}
+.stage-tab.done .stage-no {
+  color: var(--ok);
+  border-color: rgba(111, 191, 147, 0.35);
+}
+.stage-tab.active.done .stage-no {
+  color: var(--accent-ink);
+  border-color: transparent;
 }
 .stage-label {
   flex: 1 1 auto;
   min-width: 0;
 }
-.stage-icon {
-  font-size: 12px;
-  color: var(--text-3);
-  flex: 0 0 auto;
-}
-.stage-tab.active .stage-icon {
-  color: var(--accent);
-}
 .stage-tick {
   flex: 0 0 auto;
-  font-size: 11px;
+  font-size: var(--fs-11);
   color: var(--ok);
 }
 .stage-gate {
   flex: 0 0 auto;
-  font-size: 10px;
+  font-size: var(--fs-11);
   color: var(--warn);
 }
 .stage-tab.blocked {
-  border-color: rgba(248, 113, 113, 0.32);
   color: var(--danger);
+  background: var(--danger-soft);
+}
+.stage-tab.blocked .stage-no {
+  color: var(--danger);
+  border-color: rgba(224, 122, 106, 0.4);
 }
 .stage-tab.blocked .stage-gate {
   color: var(--danger);
 }
 .stage-tab.stale {
-  border-color: rgba(251, 191, 36, 0.28);
+  background: var(--warn-soft);
 }
 .stage-tab.stale .stage-gate {
   color: var(--warn);
@@ -1619,7 +1896,7 @@ async function submitCopy(): Promise<void> {
 .wb-gates {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
 }
 .gate-list {
   list-style: none;
@@ -1627,15 +1904,15 @@ async function submitCopy(): Promise<void> {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--space-1);
 }
 .gate-item {
   display: flex;
   align-items: center;
-  gap: 7px;
-  padding: 4px 7px;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
   border-radius: var(--radius-xs);
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--text-2);
   border: 1px solid transparent;
 }
@@ -1645,12 +1922,12 @@ async function submitCopy(): Promise<void> {
 .gate-item.pending {
   color: var(--text-0);
   background: var(--warn-soft);
-  border-color: rgba(251, 191, 36, 0.32);
+  border-color: rgba(232, 203, 109, 0.32);
 }
 .gate-mark {
   width: 12px;
   text-align: center;
-  font-size: 10px;
+  font-size: var(--fs-11);
   color: var(--text-3);
   flex: 0 0 auto;
 }
@@ -1672,14 +1949,14 @@ async function submitCopy(): Promise<void> {
 .error-item {
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  padding: 9px 10px;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-3);
   border-radius: var(--radius-sm);
   border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.02);
+  background: rgba(243, 237, 227, 0.02);
 }
 .error-item {
-  border-color: rgba(248, 113, 113, 0.28);
+  border-color: rgba(224, 122, 106, 0.28);
   background: var(--danger-soft);
 }
 
@@ -1689,27 +1966,27 @@ async function submitCopy(): Promise<void> {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-2);
   max-height: 320px;
   overflow: auto;
 }
 .log-item {
   display: flex;
   flex-direction: column;
-  gap: 3px;
-  padding: 7px 9px;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-sm);
   border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.018);
+  background: rgba(243, 237, 227, 0.018);
 }
 .log-top {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: var(--space-2);
   flex-wrap: wrap;
 }
 .log-node {
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 600;
   color: var(--text-1);
   max-width: 120px;
@@ -1725,23 +2002,23 @@ async function submitCopy(): Promise<void> {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-2);
   max-height: 300px;
   overflow: auto;
 }
 .version-item {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 7px 9px;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-sm);
   border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.018);
+  background: rgba(243, 237, 227, 0.018);
 }
 .version-top {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: var(--space-2);
   flex-wrap: wrap;
 }
 .version-diff {
@@ -1754,14 +2031,14 @@ async function submitCopy(): Promise<void> {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: var(--space-1);
 }
 .version-diff li {
   display: flex;
   align-items: baseline;
-  gap: 5px;
+  gap: var(--space-2);
   flex-wrap: wrap;
-  font-size: 12px;
+  font-size: var(--fs-12);
 }
 .diff-before {
   color: var(--danger);
@@ -1769,7 +2046,7 @@ async function submitCopy(): Promise<void> {
   opacity: 0.85;
 }
 .diff-after {
-  color: var(--ok, #34d399);
+  color: var(--ok, var(--ok));
 }
 
 /* ------------------------------------------------------------------ *
@@ -1781,10 +2058,10 @@ async function submitCopy(): Promise<void> {
   bottom: 0;
   z-index: 25;
   display: grid;
-  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1.35fr) auto;
-  gap: 16px;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1.3fr) auto;
+  gap: var(--space-5);
   align-items: center;
-  padding: 10px 20px;
+  padding: var(--space-3) var(--space-5);
   border-top: 1px solid var(--line);
   background: rgba(18, 21, 28, 0.94);
   backdrop-filter: blur(10px);
@@ -1792,38 +2069,49 @@ async function submitCopy(): Promise<void> {
 .wb-bottom-col {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-2);
   min-width: 0;
 }
 .job-strip {
   display: flex;
-  gap: 8px;
+  gap: var(--space-2);
   overflow-x: auto;
   padding-bottom: 2px;
   scrollbar-width: thin;
 }
 .job-chip {
   flex: 0 0 auto;
-  width: 208px;
+  width: 188px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 6px 9px;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--panel-2);
 }
 .job-chip-meta {
-  gap: 4px 10px;
+  gap: var(--space-1) 10px;
 }
 .job-chip-meta .ellipsis {
   max-width: 120px;
+}
+/* 费用说明比元信息更重要：失败时一眼能看到「没扣钱」 */
+.job-cost {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-2);
+}
+.job-chip-stop {
+  align-self: flex-start;
+  padding: 1px 8px;
+  font-size: var(--fs-11);
 }
 .wb-bottom-next {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 4px;
+  gap: var(--space-1);
   min-width: 0;
 }
 .wb-bottom-next .tiny {
@@ -1866,28 +2154,73 @@ async function submitCopy(): Promise<void> {
     position: static;
     max-height: none;
   }
+  /* 三列保持不堆叠：一列会让底栏吃掉 40% 屏高 */
   .wb-bottom {
-    grid-template-columns: minmax(0, 1fr);
-    align-items: start;
+    grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr) auto;
+    align-items: end;
+    gap: var(--space-3);
+  }
+  .wb-bottom-next {
+    align-items: flex-end;
+  }
+}
+
+@media (max-width: 900px) {
+  .wb-top {
+    padding: 8px var(--space-3) 6px;
+  }
+  .wb-top-row {
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+  .wb-top-actions {
+    flex-wrap: wrap;
+  }
+  .wb-title-row h1 {
+    max-width: 100%;
+  }
+  .wb-center {
+    padding: var(--space-3) var(--space-3) calc(var(--wb-bottom-h, 112px) + var(--space-3));
+  }
+  /* 底部条只保留「任务 + 下一步」；批量操作在窄屏隐藏，避免吃掉三分之一屏 */
+  .wb-bottom {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+  }
+  .wb-bottom .wb-bottom-col:nth-child(2) {
+    display: none;
+  }
+  .job-strip {
+    max-height: 62px;
+  }
+  /* ≤900 时全局导航在顶部，抽屉要从屏幕左侧开始 */
+  .wb-left {
+    left: 0;
+  }
+  .wb-right {
+    width: min(320px, 92vw);
   }
   .wb-bottom-next {
     align-items: flex-start;
   }
   .wb-bottom-next .tiny {
     text-align: left;
+    max-width: none;
   }
 }
 
 @media (max-width: 760px) {
   .wb-stats {
-    gap: 10px;
-    padding: 4px 8px;
+    gap: var(--space-3);
+    padding: var(--space-1) var(--space-2);
   }
   .wb-title-row h1 {
     max-width: 200px;
   }
   .wb-center {
-    padding: 14px;
+    padding: var(--space-4);
   }
 }
 </style>

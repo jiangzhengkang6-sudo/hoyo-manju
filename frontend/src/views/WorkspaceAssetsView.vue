@@ -350,24 +350,6 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.page {
-  padding: 24px;
-  display: flex;
-  flex-direction: column;
-  gap: var(--gap-lg);
-  max-width: 1400px;
-}
-.page-head {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 16px;
-  flex-wrap: wrap;
-}
-.page-head p {
-  margin-top: 4px;
-  max-width: 680px;
-}
 .sec-head {
   margin-bottom: 2px;
 }
@@ -376,12 +358,12 @@ onBeforeUnmount(() => {
 .toolbar {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-3);
 }
 .toolbar-filters {
   display: flex;
   align-items: flex-end;
-  gap: 12px;
+  gap: var(--space-3);
   flex-wrap: wrap;
 }
 .tb-field {
@@ -398,8 +380,8 @@ onBeforeUnmount(() => {
 /* 分段控件 */
 .seg {
   display: inline-flex;
-  padding: 3px;
-  gap: 3px;
+  padding: var(--space-1);
+  gap: var(--space-1);
   border-radius: var(--radius-sm);
   border: 1px solid var(--line);
   background: var(--bg-1);
@@ -412,7 +394,7 @@ onBeforeUnmount(() => {
   border-radius: var(--radius-xs);
   background: transparent;
   color: var(--text-1);
-  font-size: 12.5px;
+  font-size: var(--fs-12);
   font-weight: 560;
   cursor: pointer;
   transition: all var(--dur) var(--ease);
@@ -429,9 +411,9 @@ onBeforeUnmount(() => {
 
 /* 角色卡片 */
 .character-card {
-  padding: 12px;
+  padding: var(--space-3);
   display: flex;
-  gap: 12px;
+  gap: var(--space-3);
   align-items: flex-start;
 }
 .cc-thumb {
@@ -441,7 +423,7 @@ onBeforeUnmount(() => {
 .cc-body {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-2);
   min-width: 0;
   flex: 1 1 auto;
 }
@@ -449,17 +431,17 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-2);
 }
 .cc-name {
-  font-size: 15px;
+  font-size: var(--fs-16);
   font-weight: 650;
   min-width: 0;
 }
 .cc-project {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: var(--space-2);
   min-width: 0;
 }
 .cc-identity {
@@ -473,7 +455,7 @@ onBeforeUnmount(() => {
 .cc-foot {
   display: flex;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-2);
   margin-top: auto;
   padding-top: 8px;
   border-top: 1px solid var(--line);
@@ -481,26 +463,26 @@ onBeforeUnmount(() => {
 
 /* 画风卡片 */
 .style-card {
-  padding: 14px;
+  padding: var(--space-4);
   display: flex;
   flex-direction: column;
-  gap: 9px;
+  gap: var(--space-3);
 }
 .sc-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-2);
 }
 .sc-name {
-  font-size: 15px;
+  font-size: var(--fs-16);
   font-weight: 650;
   min-width: 0;
 }
 .sc-project {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-2);
   min-width: 0;
 }
 .sc-desc {
@@ -511,11 +493,11 @@ onBeforeUnmount(() => {
 .sc-palette {
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: var(--space-2);
 }
 .swatches {
   display: flex;
-  gap: 6px;
+  gap: var(--space-2);
   flex-wrap: wrap;
 }
 .swatch {
@@ -526,17 +508,17 @@ onBeforeUnmount(() => {
   display: block;
 }
 .palette-text {
-  gap: 6px;
+  gap: var(--space-2);
 }
 .sc-meta {
   margin: 0;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
 }
 .sc-meta-row {
   display: flex;
-  gap: 8px;
+  gap: var(--space-2);
   margin: 0;
 }
 .sc-meta-row dt {

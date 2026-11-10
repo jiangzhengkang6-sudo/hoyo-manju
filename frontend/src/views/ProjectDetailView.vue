@@ -148,6 +148,26 @@ async function toggleArchiveEpisode(episode: Episode): Promise<void> {
   }
 }
 
+/** 彻底删除剧集：内容全部清空、不可恢复（只想隐藏请用「归档」）。 */
+async function deleteEpisode(episode: Episode): Promise<void> {
+  const ok = window.confirm(
+    `确定彻底删除剧集「${episode.title}」？\n\n` +
+      '剧本、分镜、角色卡、音视频与导出记录都会一并删除，且无法恢复。\n' +
+      '如果只是想从列表里隐藏，请改点「归档」（归档可恢复）。',
+  )
+  if (!ok) return
+  busyEpisodeId.value = episode.id
+  try {
+    await episodesApi.remove(episode.id)
+    toast.success('剧集已删除', episode.title)
+    await store.loadEpisodes(props.projectId)
+  } catch {
+    /* api 层已提示（例如还有进行中的任务会返回 409） */
+  } finally {
+    busyEpisodeId.value = null
+  }
+}
+
 async function toggleArchiveProject(): Promise<void> {
   if (!current.value) return
   try {
@@ -238,7 +258,7 @@ async function toggleArchiveProject(): Promise<void> {
               <th style="width: 110px">阶段</th>
               <th style="width: 110px">目标时长</th>
               <th style="width: 120px">更新时间</th>
-              <th style="width: 210px" />
+              <th style="width: 280px" />
             </tr>
           </thead>
           <tbody>
@@ -282,6 +302,15 @@ async function toggleArchiveProject(): Promise<void> {
                     @click="toggleArchiveEpisode(episode)"
                   >
                     {{ episode.archived ? '恢复' : '归档' }}
+                  </button>
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-danger"
+                    :disabled="busyEpisodeId === episode.id"
+                    title="彻底删除（不可恢复）。只想隐藏请用「归档」"
+                    @click="deleteEpisode(episode)"
+                  >
+                    删除
                   </button>
                 </div>
               </td>
@@ -374,7 +403,7 @@ async function toggleArchiveProject(): Promise<void> {
             min="1000"
             step="1000"
           />
-          <span class="hint">上限 {{ (config.episodeMaxMs / 1000).toFixed(0) }}s（来自 /config/limits）</span>
+          <span class="hint">上限 {{ (config.episodeMaxMs / 1000).toFixed(0) }}s（后台配置）</span>
         </div>
       </div>
       <p v-if="formError" class="field-error">{{ formError }}</p>
@@ -389,47 +418,23 @@ async function toggleArchiveProject(): Promise<void> {
 </template>
 
 <style scoped>
-.page {
-  padding: 24px;
-  display: flex;
-  flex-direction: column;
-  gap: var(--gap-lg);
-  max-width: 1400px;
-}
 .crumbs {
   display: flex;
-  gap: 8px;
+  gap: var(--space-2);
   align-items: center;
 }
 .crumbs a:hover {
   color: var(--accent);
-}
-.page-head {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 16px;
-  flex-wrap: wrap;
 }
 .stat-row {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: var(--gap);
 }
-.two-col {
-  display: grid;
-  grid-template-columns: 1.1fr 1fr;
-  gap: var(--gap);
-}
-@media (max-width: 1080px) {
-  .two-col {
-    grid-template-columns: 1fr;
-  }
-}
 .bucket-group {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
   margin-bottom: 16px;
 }
 .bucket-group:last-child {
@@ -439,7 +444,7 @@ async function toggleArchiveProject(): Promise<void> {
   display: grid;
   grid-template-columns: 92px 1fr 76px;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-3);
 }
 .bucket-label {
   color: var(--text-1);
@@ -454,7 +459,7 @@ async function toggleArchiveProject(): Promise<void> {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-3);
   max-height: 320px;
   overflow: auto;
 }
@@ -463,11 +468,11 @@ async function toggleArchiveProject(): Promise<void> {
   padding-left: 10px;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: var(--space-1);
 }
 .form-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 12px;
+  gap: var(--space-3);
 }
 </style>

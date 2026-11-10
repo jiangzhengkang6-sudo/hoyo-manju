@@ -70,6 +70,8 @@ class WorkflowState(TypedDict, total=False):
     workflow_run_id: str
     source_text: str
     shot_count: int
+    #: 启动时已存在可用剧本 → `story_agent` 只复用、不重新调用模型
+    reuse_script: bool
     story_document_id: str
     script_version: int
     script_valid: bool

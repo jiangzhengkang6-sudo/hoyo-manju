@@ -419,6 +419,241 @@ def regenerate_shots(
     return updated, changed
 
 
+def _suggest_one(
+    session: Session,
+    *,
+    payload: dict[str, Any],
+    bible: dict[str, Any],
+    beats: list[Any],
+    prev_shot: dict[str, Any] | None,
+    next_shot: dict[str, Any] | None,
+    instruction: str = "",
+) -> tuple[dict[str, Any], int]:
+    """单镜建议的公共实现：输入「这一镜的现状 + 上下文」，返回归一后的建议字段。
+
+    只产出草稿、不落库；两条入口（剧本页 JSON、分镜画面页 Shot 行）共用同一套
+    prompt 与归一逻辑，避免两边各写一份、结果不一致。
+    """
+    from app.core.config import settings
+    from app.schemas import (
+        CAMERA_ALIASES,
+        CAMERA_MOVEMENTS,
+        COMPOSITION_ALIASES,
+        COMPOSITIONS,
+        _match_known_name,
+        normalize_enum,
+    )
+
+    shot_no = int(payload.get("shot_no") or 0)
+    names = {
+        str(c.get("name") or "").strip()
+        for c in (bible.get("characters") or [])
+        if isinstance(c, dict)
+    }
+    names.discard("")
+    beat = next(
+        (b for b in beats if shot_no in {int(x) for x in (b.get("shots") or [])}),
+        None,
+    )
+
+    def _brief(shot: dict[str, Any] | None) -> str:
+        if not shot:
+            return "（无）"
+        return (
+            f"#{shot.get('shot_no')} {shot.get('action') or ''}"
+            f"（{shot.get('composition') or ''}/{shot.get('camera_movement') or ''}，"
+            f"{shot.get('duration_ms') or 0}ms）"
+        )
+
+    prompt = f"""你在为一集竖屏漫剧（9:16）写**第 {shot_no} 个分镜**。请根据大纲与前后镜头，让这一镜服务剧情。
+
+【故事】
+logline：{bible.get('logline') or ''}
+主题：{bible.get('theme') or ''}｜基调：{bible.get('tone') or ''}｜场景：{bible.get('setting') or ''}
+主要人物：{"; ".join(f"{c.get('name')}（{c.get('identity') or ''}）" for c in (bible.get('characters') or [])[:6] if isinstance(c, dict))}
+
+【所在情节点】
+{("- " + str(beat.get('name')) + "：" + str(beat.get('summary'))) if beat else "（未归属具体节拍）"}
+
+【前后镜头】
+上一镜：{_brief(prev_shot)}
+下一镜：{_brief(next_shot)}
+
+【当前这一镜的现状】
+{json.dumps(payload, ensure_ascii=False)[:1200]}
+
+【额外要求】
+{instruction or "让动作、台词与画面提示词更贴合剧情，信息密度高一些"}
+
+只输出一个 JSON 对象（不要数组、不要解释），字段：
+- action：本镜画面动作描述（1~2 句，写清谁在做什么、环境如何）
+- dialogue：台词数组，元素 {{"character": 人物表里的名字, "text": 台词, "emotion": 情绪词}}；没有台词就给 []
+- narration：旁白（没有就留空字符串）
+- composition：只能取 {"/".join(COMPOSITIONS)}
+- camera_movement：只能取 {"/".join(CAMERA_MOVEMENTS)}
+- duration_ms：{settings.shot_duration_ms_min}~{settings.shot_duration_ms_max} 之间的整数
+- characters：本镜出场角色名数组，必须来自人物表
+- image_prompt：画面提示词，含画风/场景/时间/构图/角色外观/动作，并说明竖屏 9:16
+- negative_prompt：需要避免的内容
+"""
+
+    provider = resolve(ProviderKind.TEXT, session)
+    result = await_result(
+        provider,
+        TextRequest(
+            prompt=prompt,
+            system=SYSTEM_PROMPT,
+            json_schema={"type": "object"},
+            temperature=0.75,
+            metadata={
+                "task": "shot_suggest",
+                "shot_no": shot_no,
+                "action": str(payload.get("action") or ""),
+                "image_prompt": str(payload.get("image_prompt") or ""),
+                "composition": str(payload.get("composition") or ""),
+                "camera_movement": str(payload.get("camera_movement") or ""),
+            },
+        ),
+    )
+    if not result.ok:
+        raise ProviderError(
+            result.error_message or "分镜建议生成失败",
+            code=result.error_code or "PROVIDER_ERROR",
+        )
+    data = result.data if isinstance(result.data, dict) else {}
+    if not data:
+        raise ProviderError("模型没有返回可用的分镜内容，请重试")
+
+    dialogue: list[dict[str, str]] = []
+    for line in data.get("dialogue") or []:
+        if not isinstance(line, dict):
+            continue
+        text = str(line.get("text") or "").strip()
+        who = _match_known_name(str(line.get("character") or ""), names) if names else None
+        if text and who:
+            dialogue.append(
+                {"character": who, "text": text, "emotion": str(line.get("emotion") or "").strip()}
+            )
+
+    characters: list[str] = []
+    for raw in data.get("characters") or []:
+        who = _match_known_name(str(raw), names) if names else str(raw).strip()
+        if who and who not in characters:
+            characters.append(who)
+    if not characters:
+        # 模型没给（或给的名字都不在人物表里）就沿用原镜头的角色，避免"生成一次把角色清空"
+        characters = [str(n) for n in (payload.get("characters") or []) if str(n).strip()]
+    if not characters:
+        characters = list(dict.fromkeys(line["character"] for line in dialogue))
+
+    try:
+        duration = int(data.get("duration_ms") or payload.get("duration_ms") or 4000)
+    except (TypeError, ValueError):
+        duration = 4000
+    duration = max(settings.shot_duration_ms_min, min(settings.shot_duration_ms_max, duration))
+
+    suggestion = {
+        "duration_ms": duration,
+        "composition": normalize_enum(
+            data.get("composition"),
+            COMPOSITIONS,
+            COMPOSITION_ALIASES,
+            str(payload.get("composition") or "中景"),
+        ),
+        "camera_movement": normalize_enum(
+            data.get("camera_movement"),
+            CAMERA_MOVEMENTS,
+            CAMERA_ALIASES,
+            str(payload.get("camera_movement") or "固定"),
+        ),
+        "characters": characters,
+        "action": str(data.get("action") or "").strip(),
+        "dialogue": dialogue,
+        "narration": str(data.get("narration") or "").strip(),
+        "emotion": str(data.get("emotion") or payload.get("emotion") or "").strip(),
+        "image_prompt": str(data.get("image_prompt") or "").strip(),
+        "negative_prompt": str(
+            data.get("negative_prompt") or payload.get("negative_prompt") or ""
+        ).strip(),
+    }
+    return suggestion, int(result.cost_cents or 0)
+
+
+def suggest_shot(
+    session: Session,
+    *,
+    script: dict[str, Any],
+    shot_no: int,
+    instruction: str = "",
+) -> tuple[dict[str, Any], int]:
+    """剧本页（JSON 草稿）入口：按大纲为单个分镜生成可编辑草稿（不落库）。"""
+    shots = script.get("shots") or []
+    target = next(
+        (s for s in shots if int(s.get("shot_no") or 0) == int(shot_no)), None
+    )
+    if target is None:
+        raise SchemaValidationFailed(f"未找到分镜 {shot_no}")
+    index = shots.index(target)
+    return _suggest_one(
+        session,
+        payload=target,
+        bible=script.get("story_bible") or {},
+        beats=script.get("beat_sheet") or [],
+        prev_shot=shots[index - 1] if index > 0 else None,
+        next_shot=shots[index + 1] if index + 1 < len(shots) else None,
+        instruction=instruction,
+    )
+
+
+def suggest_shot_for_row(
+    session: Session,
+    *,
+    episode: Episode,
+    shot: Any,
+    instruction: str = "",
+) -> tuple[dict[str, Any], int]:
+    """分镜画面页入口：以 `Shot` 行（用户正在编辑的那份）为准。
+
+    剧情上下文（人物表、节拍表）取自最新剧本；镜头现状取自 Shot 行，
+    这样即使用户先改过这一镜，AI 也是基于「屏幕上这份」给建议。
+    """
+    from sqlalchemy import select
+
+    from app.db.models import Shot as ShotModel
+    from app.db.models import StoryDocument
+
+    document = session.scalar(
+        select(StoryDocument)
+        .where(StoryDocument.episode_id == episode.id)
+        .order_by(StoryDocument.version.desc())
+    )
+    script = (document.story_json if document else {}) or {}
+    rows = list(
+        session.scalars(
+            select(ShotModel)
+            .where(ShotModel.episode_id == episode.id)
+            .order_by(ShotModel.shot_no)
+        )
+    )
+
+    def _flat(row: Any | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        return {**(row.shot_json or {}), "shot_no": row.shot_no, "duration_ms": row.duration_ms}
+
+    payload = _flat(shot) or {}
+    index = next((i for i, row in enumerate(rows) if row.id == shot.id), -1)
+    return _suggest_one(
+        session,
+        payload=payload,
+        bible=script.get("story_bible") or {},
+        beats=script.get("beat_sheet") or [],
+        prev_shot=_flat(rows[index - 1]) if index > 0 else None,
+        next_shot=_flat(rows[index + 1]) if 0 <= index < len(rows) - 1 else None,
+        instruction=instruction,
+    )
+
+
 def run_coro(coro: Any) -> Any:
     """在同步上下文中执行异步适配器调用。
 

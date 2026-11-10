@@ -113,6 +113,7 @@ def render_episode(
     kind: str = "preview",
     preset: str = "720p_9x16",
     watermark: bool = True,
+    only_ready: bool = False,
     progress_cb: ProgressCb | None = None,
 ) -> tuple[MediaAsset, dict[str, Any]]:
     binary = ffmpeg_bin()
@@ -122,7 +123,7 @@ def render_episode(
             details={"hint": "请安装 FFmpeg 或设置 FFMPEG_BIN 环境变量"},
         )
 
-    validation = validate_timeline(session, episode)
+    validation = validate_timeline(session, episode, only_ready=only_ready)
     if not validation["valid"]:
         raise RenderError(
             "时间线校验未通过，无法开始合成",
@@ -420,6 +421,8 @@ def render_episode(
         "dialogue_count": len(timeline["tracks"]["dialogue"]),
         "bgm_count": len(timeline["tracks"]["bgm"]),
         "aigc": settings.aigc_label_text,
+        # 部分预览（只含已就绪镜头）标记，前端据此提示「这不是完整成片」
+        "partial": only_ready,
     }
     report(100, "合成完成")
     return asset, manifest

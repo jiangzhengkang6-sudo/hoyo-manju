@@ -142,13 +142,13 @@ function statusLabel(status: string): string {
 .node-progress {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-3);
   min-width: 0;
 }
 .node-head {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-3);
   flex-wrap: wrap;
 }
 .node-track {
@@ -167,7 +167,7 @@ function statusLabel(status: string): string {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-2);
   min-width: 78px;
   padding: 0 6px;
   cursor: default;
@@ -189,7 +189,7 @@ function statusLabel(status: string): string {
   z-index: 0;
 }
 .node-link.filled {
-  background: linear-gradient(90deg, rgba(56, 189, 248, 0.5), rgba(167, 139, 250, 0.5));
+  background: linear-gradient(90deg, rgba(224, 138, 60, 0.5), rgba(201, 116, 58, 0.5));
 }
 .node-dot {
   position: relative;
@@ -201,13 +201,13 @@ function statusLabel(status: string): string {
   background: var(--panel-2);
   display: grid;
   place-items: center;
-  font-size: 11px;
+  font-size: var(--fs-11);
   font-weight: 700;
   color: var(--text-2);
   transition: all var(--dur) var(--ease);
 }
 .node-label {
-  font-size: 11px;
+  font-size: var(--fs-11);
   color: var(--text-2);
   max-width: 84px;
   text-align: center;
@@ -216,12 +216,12 @@ function statusLabel(status: string): string {
   position: absolute;
   top: -3px;
   right: calc(50% - 17px);
-  font-size: 9px;
+  font-size: var(--fs-11);
   color: var(--warn);
 }
 .tone-ok .node-dot {
   background: var(--ok-soft);
-  border-color: rgba(52, 211, 153, 0.45);
+  border-color: rgba(111, 191, 147, 0.45);
   color: var(--ok);
 }
 .tone-ok .node-label {
@@ -231,17 +231,17 @@ function statusLabel(status: string): string {
   background: var(--accent-soft);
   border-color: var(--line-accent);
   color: var(--accent);
-  box-shadow: 0 0 0 4px rgba(56, 189, 248, 0.08);
+  box-shadow: 0 0 0 4px rgba(224, 138, 60, 0.08);
 }
 .tone-warn .node-dot {
   background: var(--warn-soft);
-  border-color: rgba(251, 191, 36, 0.5);
+  border-color: rgba(232, 203, 109, 0.5);
   color: var(--warn);
-  box-shadow: 0 0 0 4px rgba(251, 191, 36, 0.08);
+  box-shadow: 0 0 0 4px rgba(232, 203, 109, 0.08);
 }
 .tone-danger .node-dot {
   background: var(--danger-soft);
-  border-color: rgba(248, 113, 113, 0.5);
+  border-color: rgba(224, 122, 106, 0.5);
   color: var(--danger);
 }
 .node-item.current .node-label {
@@ -257,12 +257,12 @@ function statusLabel(status: string): string {
  * ------------------------------------------------------------------ */
 
 .node-progress.vertical {
-  gap: 6px;
+  gap: var(--space-2);
 }
 .node-track.vertical {
   flex-direction: column;
   align-items: stretch;
-  gap: 2px;
+  gap: var(--space-1);
   overflow: visible;
   padding: 2px 0 0;
 }
@@ -270,9 +270,9 @@ function statusLabel(status: string): string {
   flex-direction: row;
   align-items: center;
   justify-content: flex-start;
-  gap: 8px;
+  gap: var(--space-2);
   min-width: 0;
-  padding: 4px 6px;
+  padding: var(--space-1) var(--space-2);
   border-radius: var(--radius-xs);
   border: 1px solid transparent;
   transition: all var(--dur) var(--ease);
@@ -290,7 +290,7 @@ function statusLabel(status: string): string {
 .node-track.vertical .node-dot {
   width: 18px;
   height: 18px;
-  font-size: 10px;
+  font-size: var(--fs-11);
   flex: 0 0 auto;
 }
 .node-track.vertical .node-label {
@@ -298,7 +298,7 @@ function statusLabel(status: string): string {
   text-align: left;
   flex: 1 1 auto;
   min-width: 0;
-  font-size: 12px;
+  font-size: var(--fs-12);
 }
 .node-track.vertical .node-item.current .node-dot {
   transform: none;

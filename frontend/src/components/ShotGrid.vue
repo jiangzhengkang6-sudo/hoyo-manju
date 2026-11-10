@@ -34,6 +34,9 @@ interface CardView {
   confirmed: boolean
   stale: boolean
   videoState: string
+  videoLabel: string
+  videoTone: string
+  audioLabel: string
   audioState: string
   selected: boolean
   active: boolean
@@ -42,8 +45,11 @@ interface CardView {
 const cards = computed<CardView[]>(() =>
   props.shots.map((shot) => {
     const candidates = shot.candidates ?? []
-    const mediaId = shot.confirmed_media_id ?? shot.selected_media_id ?? candidates[0]?.media_id ?? null
-    const candidate = candidates.find((c) => c.media_id === mediaId)
+    // `media_id` 由 api 层归一（后端主键叫 id）；这里再用 id 兜一次，
+    // 避免绕过 fetchShots 直接把原始行塞进组件时又变成「暂无素材」。
+    const firstId = candidates[0]?.media_id || candidates[0]?.id || null
+    const mediaId = shot.confirmed_media_id ?? shot.selected_media_id ?? firstId
+    const candidate = candidates.find((c) => (c.media_id || c.id) === mediaId)
     return {
       shot,
       mediaId,
@@ -52,6 +58,9 @@ const cards = computed<CardView[]>(() =>
       confirmed: Boolean(shot.confirmed_media_id),
       stale: Boolean(shot.stale),
       videoState: shot.video_skipped ? '已跳过' : (shot.video_status ?? ''),
+      videoLabel: videoLabel(shot.video_skipped ? 'SKIPPED' : (shot.video_status ?? '')),
+      videoTone: videoTone(shot.video_skipped ? 'SKIPPED' : (shot.video_status ?? '')),
+      audioLabel: audioLabel(shot.audio_status ?? ''),
       audioState: shot.audio_status ?? '',
       selected: props.selectedNos.includes(shot.shot_no),
       active: props.activeNo === shot.shot_no,
@@ -59,12 +68,44 @@ const cards = computed<CardView[]>(() =>
   }),
 )
 
+/* 状态一律说人话：后端返回的是 VIDEO_STATUS 这类枚举，直接铺在卡片上没人看得懂 */
+const VIDEO_LABELS: Record<string, string> = {
+  PENDING: '待生成',
+  QUEUED: '排队中',
+  RUNNING: '生成中',
+  SUCCEEDED: '已生成',
+  CANDIDATES_READY: '待确认',
+  CONFIRMED: '已确认',
+  FAILED: '失败',
+  SKIPPED: '已跳过',
+  STALE: '已过期',
+}
+const AUDIO_LABELS: Record<string, string> = {
+  PENDING: '待配音',
+  RUNNING: '配音中',
+  READY: '已配音',
+  NO_DIALOGUE: '无台词',
+  SKIPPED: '已跳过',
+  FAILED: '失败',
+}
+
+function videoLabel(state: string): string {
+  if (!state) return ''
+  return VIDEO_LABELS[state.toUpperCase()] ?? '待生成'
+}
+
+function audioLabel(state: string): string {
+  if (!state) return ''
+  return AUDIO_LABELS[state.toUpperCase()] ?? '待配音'
+}
+
 function videoTone(state: string): string {
   const s = state.toUpperCase()
   if (s === 'SUCCEEDED' || s === 'READY' || s === 'CONFIRMED') return 'ok'
+  if (s === 'CANDIDATES_READY') return 'warn'
   if (s === 'RUNNING' || s === 'QUEUED' || s === 'PENDING') return 'info'
   if (s === 'FAILED') return 'danger'
-  if (state === '已跳过') return 'warn'
+  if (s === 'SKIPPED') return 'muted'
   return 'muted'
 }
 </script>
@@ -105,11 +146,13 @@ function videoTone(state: string): string {
           {{ (card.shot.characters ?? []).join('、') || '无角色' }}
         </div>
         <div class="shot-badges">
-          <span v-if="card.videoState" class="badge badge-dot" :class="`badge-${videoTone(card.videoState)}`">
-            {{ card.videoState === '已跳过' ? '已跳过' : `视频 ${card.videoState}` }}
+          <span v-if="card.videoLabel" class="badge badge-dot" :class="`badge-${card.videoTone}`">
+            视频 · {{ card.videoLabel }}
           </span>
-          <span v-if="card.audioState" class="badge badge-dot badge-info">音频 {{ card.audioState }}</span>
-          <span v-if="!card.videoState && !card.audioState" class="badge">未生成视频</span>
+          <span v-if="card.audioLabel" class="badge badge-dot badge-info">
+            音频 · {{ card.audioLabel }}
+          </span>
+          <span v-if="!card.videoLabel && !card.audioLabel" class="badge badge-muted">尚未生成</span>
         </div>
       </div>
 
@@ -148,10 +191,10 @@ function videoTone(state: string): string {
 }
 .shot-card.active {
   border-color: var(--line-accent);
-  box-shadow: 0 0 0 1px var(--line-accent), 0 10px 26px rgba(56, 189, 248, 0.12);
+  box-shadow: 0 0 0 1px var(--line-accent), 0 10px 26px rgba(224, 138, 60, 0.12);
 }
 .shot-card.selected {
-  border-color: rgba(167, 139, 250, 0.5);
+  border-color: rgba(201, 116, 58, 0.5);
 }
 .shot-card.confirmed .shot-thumb::after {
   content: '';
@@ -169,10 +212,10 @@ function videoTone(state: string): string {
   position: absolute;
   left: 6px;
   top: 6px;
-  font-size: 10.5px;
+  font-size: var(--fs-11);
   padding: 1px 6px;
   border-radius: var(--radius-pill);
-  background: rgba(6, 9, 14, 0.72);
+  background: rgba(6, 5, 4, 0.72);
   border: 1px solid var(--line);
   color: var(--text-0);
 }
@@ -182,7 +225,7 @@ function videoTone(state: string): string {
   bottom: 6px;
   padding: 1px 6px;
   border-radius: var(--radius-pill);
-  background: rgba(6, 9, 14, 0.72);
+  background: rgba(6, 5, 4, 0.72);
   border: 1px solid var(--line);
   color: var(--text-1);
 }
@@ -195,53 +238,53 @@ function videoTone(state: string): string {
   border-radius: 50%;
   display: grid;
   place-items: center;
-  font-size: 11px;
+  font-size: var(--fs-11);
   font-weight: 700;
   background: var(--ok-soft);
-  border: 1px solid rgba(52, 211, 153, 0.5);
+  border: 1px solid rgba(111, 191, 147, 0.5);
   color: var(--ok);
 }
 .shot-stale {
   position: absolute;
   right: 6px;
   bottom: 6px;
-  font-size: 10.5px;
+  font-size: var(--fs-11);
   padding: 1px 6px;
   border-radius: var(--radius-pill);
   background: var(--warn-soft);
-  border: 1px solid rgba(251, 191, 36, 0.45);
+  border: 1px solid rgba(232, 203, 109, 0.45);
   color: var(--warn);
 }
 .shot-info {
-  padding: 8px 10px 10px;
+  padding: var(--space-2) var(--space-3) 10px;
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: var(--space-2);
 }
 .shot-line1 {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 6px;
+  gap: var(--space-2);
 }
 .shot-dur {
-  font-size: 12.5px;
+  font-size: var(--fs-12);
   font-weight: 600;
 }
 .shot-badges {
   display: flex;
-  gap: 4px;
+  gap: var(--space-1);
   flex-wrap: wrap;
 }
 .shot-badges .badge {
   height: 18px;
-  font-size: 10.5px;
+  font-size: var(--fs-11);
   padding: 0 6px;
 }
 .shot-check {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-2);
   padding: 0 10px 9px;
   cursor: pointer;
 }

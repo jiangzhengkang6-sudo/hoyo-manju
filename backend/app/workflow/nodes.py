@@ -173,6 +173,27 @@ def node_story_agent(state: WorkflowState) -> dict[str, Any]:
     with session_scope() as session:
         run = session.get(WorkflowRun, state["workflow_run_id"])
         episode = session.get(Episode, state["episode_id"])
+        # 用户在「故事与剧本」页已经生成/手改过剧本时，启动工作流只复用、不重生成：
+        # 否则点一次「启动工作流」就再扣一次模型费用，并把人工修改覆盖成新版本。
+        document = session.scalar(
+            select(StoryDocument)
+            .where(StoryDocument.episode_id == episode.id)
+            .order_by(StoryDocument.version.desc())
+            .limit(1)
+        )
+        if state.get("reuse_script") and document is not None:
+            if (document.story_json or {}).get("shots"):
+                episode.stage = EpisodeStage.SCRIPT_REVIEW.value
+                _log(session, run, "story_agent", "SUCCESS", started,
+                     f"复用已有剧本 v{document.version}（未重新生成）",
+                     {"story_document_id": document.id, "version": document.version,
+                      "reused": True})
+                session.flush()
+                return {
+                    "last_node": "story_agent",
+                    "story_document_id": document.id,
+                    "script_version": document.version,
+                }
         episode.stage = EpisodeStage.SCRIPT_REVIEW.value
         job = _run_job(
             session,
@@ -287,7 +308,10 @@ def node_character_agent(state: WorkflowState) -> dict[str, Any]:
         if document is None:
             raise AppError("剧本不存在，无法生成角色", code="STATE_CONFLICT")
 
-        characters = character_agent.sync_characters_from_script(session, project, document.story_json)
+        synced = character_agent.sync_characters_from_script(
+            session, project, document.story_json, document=document, episode_id=episode.id
+        )
+        characters = synced["characters"]
         session.flush()
 
         pending = [c for c in characters if c.is_main and not c.primary_media_id]
@@ -324,10 +348,13 @@ def node_gate_character_confirmation(state: WorkflowState) -> dict[str, Any]:
         from app.db.models import CharacterAsset
 
         episode = session.get(Episode, run.episode_id)
+        from app.agents import character as character_agent
+
+        # 只取本集角色（+ 项目级公共角色），否则同名角色会串到别的剧集
         characters = list(
-            session.scalars(
-                select(CharacterAsset).where(CharacterAsset.project_id == episode.project_id)
-            )
+            character_agent.episode_characters(
+                session, episode.project_id, episode.id
+            ).values()
         )
         gate_payload = {
             "characters": [
@@ -346,10 +373,13 @@ def node_gate_character_confirmation(state: WorkflowState) -> dict[str, Any]:
         from app.db.models import CharacterAsset
 
         episode = session.get(Episode, run.episode_id)
+        from app.agents import character as character_agent
+
+        # 只取本集角色（+ 项目级公共角色），否则同名角色会串到别的剧集
         characters = list(
-            session.scalars(
-                select(CharacterAsset).where(CharacterAsset.project_id == episode.project_id)
-            )
+            character_agent.episode_characters(
+                session, episode.project_id, episode.id
+            ).values()
         )
         missing = [c.name for c in characters if c.is_main and not c.primary_media_id]
         if (decision or {}).get("decision") == "reject":

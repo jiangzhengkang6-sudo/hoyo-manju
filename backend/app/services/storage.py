@@ -8,11 +8,12 @@ from __future__ import annotations
 import datetime as dt
 import mimetypes
 import re
+import secrets
 import shutil
 from pathlib import Path
 
 from app.core.config import settings
-from app.core.errors import StorageError
+from app.core.errors import StorageConflict, StorageError
 from app.core.security import sign_payload, verify_payload
 
 
@@ -20,6 +21,7 @@ class Storage:
     backend = "local"
 
     def put(self, key: str, content: bytes, content_type: str = "") -> str:
+        """写入对象。**已存在的键不得覆盖**（见 StorageConflict）。"""
         raise NotImplementedError
 
     def get(self, key: str) -> bytes:
@@ -66,7 +68,12 @@ class LocalStorage(Storage):
         path = self._path(key)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(content)
+            # `xb` = 独占创建：目标已存在时抛 FileExistsError，而不是静默覆盖。
+            # 这是「素材被别的角色顶替」这类事故的最后一道闸门。
+            with open(path, "xb") as fh:
+                fh.write(content)
+        except FileExistsError as exc:
+            raise StorageConflict(f"对象已存在，拒绝覆盖：{key}") from exc
         except OSError as exc:
             raise StorageError(f"写入对象存储失败：{exc}") from exc
         return key
@@ -113,12 +120,17 @@ class S3Storage(Storage):
 
     def put(self, key: str, content: bytes, content_type: str = "") -> str:
         try:
+            # S3 没有「独占创建」，只能先探测：已存在就拒绝，保持与本地存储同一语义。
+            if self.exists(key):
+                raise StorageConflict(f"对象已存在，拒绝覆盖：{key}")
             self.client.put_object(
                 Bucket=self.bucket,
                 Key=key,
                 Body=content,
                 ContentType=content_type or mimetypes.guess_type(key)[0] or "application/octet-stream",
             )
+        except StorageConflict:
+            raise
         except Exception as exc:
             raise StorageError(f"上传对象失败：{exc}") from exc
         return key
@@ -182,7 +194,11 @@ def get_storage() -> Storage:
 def storage_health() -> dict[str, object]:
     try:
         storage = get_storage()
-        probe_key = f"health/probe_{dt.datetime.now(dt.timezone.utc).timestamp():.0f}.txt"
+        probe_key = (
+            "health/probe_"
+            f"{dt.datetime.now(dt.timezone.utc).timestamp():.0f}_"
+            f"{secrets.token_hex(3)}.txt"
+        )
         storage.put(probe_key, b"ok", "text/plain")
         ok = storage.exists(probe_key)
         storage.delete(probe_key)

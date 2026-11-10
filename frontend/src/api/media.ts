@@ -1,3 +1,4 @@
+import { apiUrl } from './base'
 import { http } from './client'
 import { asList } from './projects'
 import type { MediaAsset, MediaKind } from '@/types'
@@ -25,7 +26,13 @@ export const mediaApi = {
   signedUrl: (mediaId: string) => http.get<{ url: string }>(`/media/${mediaId}/url`),
 
   /** 本地开发直连内容地址，可直接作为 <img>/<video> 的 src。 */
-  contentUrl: (mediaId: string) => `/media/${mediaId}/content`,
+  /**
+   * 媒体内容地址（给 `<img src>` / `<video src>` 直接用）。
+   *
+   * 必须带 `/api/v1` 前缀：`http` 客户端会自动加，但直接塞给 DOM 的地址不会。
+   * 少了前缀就会打到前端 dev server 的根路径，拿到 SPA 的 HTML → 视频黑屏/无法播放。
+   */
+  contentUrl: (mediaId: string) => apiUrl(`/media/${mediaId}/content`),
 
   episodeMedia: (episodeId: string, kind?: MediaKind) =>
     http.get<MediaAsset[] | { items: MediaAsset[] }>(`/episodes/${episodeId}/media`, { kind }),

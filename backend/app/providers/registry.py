@@ -25,6 +25,7 @@ from app.providers.http_providers import (
 )
 from app.providers.custom import (
     DeepSeekTextProvider,
+    QwenImageProvider,
     QwenTtsProvider,
     ToapisImageProvider,
     ToapisVideoProvider,
@@ -46,7 +47,9 @@ IMAGE_FACTORIES = {
     "mock": lambda **kw: MockImageProvider(),
     "ark": lambda **kw: ArkImageProvider(**kw),
     "openai": lambda **kw: OpenAIImageProvider(**kw),
+    # gemini = toapis 异步任务（需要国际出口）；qwen = 通义网关同步接口（国内可达）
     "gemini": lambda **kw: ToapisImageProvider(**kw),
+    "qwen": lambda **kw: QwenImageProvider(**kw),
 }
 VIDEO_FACTORIES = {
     "mock": lambda **kw: MockVideoProvider(),

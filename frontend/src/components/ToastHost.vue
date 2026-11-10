@@ -59,7 +59,7 @@ function copyTrace(traceId: string): void {
   z-index: 90;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-3);
   width: 380px;
   max-width: calc(100vw - 40px);
   pointer-events: none;
@@ -68,8 +68,8 @@ function copyTrace(traceId: string): void {
 .toast {
   pointer-events: auto;
   display: flex;
-  gap: 10px;
-  padding: 12px 12px 12px 13px;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
   border-radius: var(--radius);
   background: var(--panel);
   border: 1px solid var(--line-strong);
@@ -104,7 +104,7 @@ function copyTrace(traceId: string): void {
   border-radius: 50%;
   display: grid;
   place-items: center;
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 700;
   background: var(--neutral-soft);
   color: var(--text-1);
@@ -128,17 +128,17 @@ function copyTrace(traceId: string): void {
   min-width: 0;
 }
 .toast-title {
-  font-size: 13px;
+  font-size: var(--fs-13);
   font-weight: 620;
 }
 .toast-message {
-  font-size: 12.5px;
+  font-size: var(--fs-12);
   color: var(--text-1);
   margin-top: 2px;
   word-break: break-word;
 }
 .toast-detail {
-  font-size: 11.5px;
+  font-size: var(--fs-11);
   color: var(--text-2);
   margin-top: 4px;
   word-break: break-word;
@@ -148,7 +148,7 @@ function copyTrace(traceId: string): void {
   background: transparent;
   border: 1px dashed var(--line-strong);
   color: var(--text-2);
-  font-size: 11px;
+  font-size: var(--fs-11);
   padding: 2px 6px;
   border-radius: var(--radius-xs);
   cursor: pointer;
@@ -167,7 +167,7 @@ function copyTrace(traceId: string): void {
   background: transparent;
   border: 0;
   color: var(--text-2);
-  font-size: 17px;
+  font-size: var(--fs-16);
   line-height: 1;
   cursor: pointer;
   padding: 0 2px;

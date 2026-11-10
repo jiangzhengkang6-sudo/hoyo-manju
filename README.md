@@ -158,10 +158,10 @@ initialize → safety_check_input → story_agent → validate_script
 
 | 模态 | 可选 | Mock 行为 |
 |------|------|-----------|
-| text | `mock` / `ark` / `openai` | 结构化剧本 JSON |
-| image | `mock` / `ark` / `openai` | Pillow 真实生成 PNG |
-| video | `mock` / `ark` / `kling` | FFmpeg zoompan 真实生成 MP4 |
-| speech | `mock` / `minimax` / `openai` | FFmpeg 生成真实 MP3 |
+| text | `mock` / `ark` / `openai` / `deepseek` | 结构化剧本 JSON |
+| image | `mock` / `ark` / `openai` / `gemini`（toapis 异步，需国际出口）/ `qwen`（通义同步，国内可达） | Pillow 真实生成 PNG |
+| video | `mock` / `ark` / `kling` / `grok`（toapis） | FFmpeg zoompan 真实生成 MP4 |
+| speech | `mock` / `minimax` / `openai` / `qwen` | FFmpeg 生成真实 MP3 |
 
 在「设置」页或 `PUT /api/v1/settings/providers` 配置密钥（服务端加密存储，接口只回 `configured` 与掩码前缀）。
 

@@ -1,4 +1,4 @@
-import { http, type RequestOptions } from './client'
+import { http, pushToast, type RequestOptions } from './client'
 import { asList } from './projects'
 import type { Job, JobQuery, Paginated, ProviderCall } from '@/types'
 
@@ -32,6 +32,20 @@ export const jobsApi = {
 
 export async function fetchProviderCalls(jobId: string): Promise<ProviderCall[]> {
   return asList<ProviderCall>(await jobsApi.providerCalls(jobId))
+}
+
+/**
+ * 停止任务（排队中立即取消；执行中在下一个检查点停）。
+ *
+ * 统一在这里弹提示：取消不是瞬时生效的——正在生成的那一张/那一条会先跑完，
+ * 费用照常结算。把这句话说清楚，用户才不会以为按钮没反应。
+ */
+export async function cancelJob(jobId: string): Promise<Job | null> {
+  const res = await jobsApi.cancel(jobId)
+  if (res.note) {
+    pushToast({ kind: 'info', title: '已请求停止', message: res.note })
+  }
+  return res.job ?? null
 }
 
 /** 任务列表归一化（后端可能返回裸数组）。`opts.silent` 用于轮询等不希望弹 toast 的场景。 */
@@ -114,6 +128,7 @@ export const JOB_TYPE_LABEL: Record<string, string> = {
   IMAGE_GENERATION: '分镜图生成',
   VIDEO_GENERATION: '视频生成',
   TTS_GENERATION: '配音生成',
+  BGM_GENERATION: '氛围音生成',
   SUBTITLE_GENERATION: '字幕生成',
   CHARACTER_ASSET_GENERATION: '角色资产生成',
   SCRIPT_REGENERATE: '分镜重生成',

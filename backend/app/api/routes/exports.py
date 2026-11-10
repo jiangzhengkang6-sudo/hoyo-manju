@@ -116,7 +116,7 @@ def render_preview(episode_id: str, payload: RenderPreviewIn, session: SessionDe
     degraded_service.ensure_available(degraded_service.KIND_STORAGE, action="预览合成")
     # §12-8：被拦截的内容禁止预览/确认/导出（申诉经人工批准后才放行）
     safety_agent.assert_export_allowed(session, episode)
-    validation = edit_agent.validate_timeline(session, episode)
+    validation = edit_agent.validate_timeline(session, episode, only_ready=payload.partial)
     if not validation["valid"]:
         from app.core.errors import RenderError
 
@@ -125,7 +125,9 @@ def render_preview(episode_id: str, payload: RenderPreviewIn, session: SessionDe
             details={"errors": validation["errors"], "warnings": validation["warnings"]},
         )
     # FR-010 / FR-042 / §12-6：合成也占配额，不足则在建任务前阻断
-    quote = edit_agent.estimate_render(session, episode, kind="preview")
+    quote = edit_agent.estimate_render(
+        session, episode, kind="preview", only_ready=payload.partial
+    )
     job = jobs_service.create_job(
         session,
         type="RENDER_PREVIEW",
@@ -136,7 +138,7 @@ def render_preview(episode_id: str, payload: RenderPreviewIn, session: SessionDe
         episode_id=episode.id,
         project_id=episode.project_id,
         stage="render_preview",
-        input_json={"watermark": payload.watermark},
+        input_json={"watermark": payload.watermark, "partial": payload.partial},
         input_summary={
             "kind": "preview",
             "watermark": payload.watermark,

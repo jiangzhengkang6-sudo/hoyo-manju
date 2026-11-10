@@ -92,7 +92,8 @@
 | GET | `/episodes/{episode_id}` | 详情，含 `stage`、`stale_flags` |
 | PATCH | `/episodes/{episode_id}` | 更新标题/目标时长 |
 | POST | `/episodes/{episode_id}/copy` | 复制剧集（复制剧本与资产引用，不复制进行中任务），body `{title?}` |
-| POST | `/episodes/{episode_id}/archive` / `/restore` | 归档 / 恢复 |
+| POST | `/episodes/{episode_id}/archive` / `/restore` | 归档 / 恢复（只改状态，数据全留，可恢复） |
+| DELETE | `/episodes/{episode_id}` | **彻底删除**（不可恢复）：剧本、分镜、角色卡、音轨、字幕、媒体文件、任务、工作流运行、审批与申诉一并删除；成本流水与审计日志保留。有进行中的任务时返回 409 |
 | GET | `/episodes/{episode_id}/cost` | 阶段成本 |
 | GET | `/episodes/{episode_id}/overview` | 工作台总览：阶段、门控、任务统计、资产计数、下游过期标记 |
 
@@ -109,6 +110,8 @@
 | PUT | `/episodes/{episode_id}/script` | 保存人工编辑，body `{story_json, base_version}`；Pydantic 校验失败返回 `SCHEMA_VALIDATION_FAILED` |
 | POST | `/episodes/{episode_id}/script/validate` | 仅校验，body `{story_json}` → `{valid, errors:[{loc, msg}], warnings:[]}` |
 | POST | `/episodes/{episode_id}/shots/regenerate` | 局部重生成 `{shot_nos:[1,2], replan_downstream:false, instruction?}` |
+| POST | `/episodes/{episode_id}/shots/{shot_no}/suggest` | 按大纲为**单个分镜**生成可编辑草稿（body `{instruction?}`，**同步**返回 `{shot_no, suggestion:{action,dialogue,composition,camera_movement,duration_ms,characters,image_prompt,...}, cost_cents}`）。不写库；前端弹窗里改完再保存剧本，适合「这一镜不够贴剧情，让 AI 先给一版」 |
+| POST | `/shots/{shot_id}/suggest` | 同上，但以**分镜画面页正在编辑的 Shot 行**为准（剧情上下文仍取自最新剧本）。分镜画面页的「AI 按大纲生成」用它，结果只填编辑区，需手动「保存镜头」 |
 
 ### 4.1 剧本 JSON（StoryBible + BeatSheet + ShotScript）
 
@@ -142,8 +145,9 @@
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET/POST | `/projects/{project_id}/characters` | 角色卡 CRUD（name 项目内唯一）。GET 默认**不含**已归档角色（`DELETE` 是软归档）；传 `?include_archived=true` 可看历史角色（与 `GET /projects` 同约定） |
-| GET/PATCH/DELETE | `/characters/{character_id}` | 详情 / 更新 / 归档。PATCH 为**局部更新**：未提供的字段一律不动（`CharacterUpdate` 全 `None` 默认）；DELETE 是软归档（`status=ARCHIVED`） |
+| GET/POST | `/projects/{project_id}/characters` | 角色卡 CRUD。GET 默认**不含**已归档角色（`DELETE` 是软归档）；`?include_archived=true` 看历史角色。**按剧集收敛**：`?episode_id=epi_x` 只返回「本集专属卡 + 项目级公共卡（`episode_id` 为空，且未被本集同名卡遮蔽）」，响应 `{items, total, hidden}`，`hidden` 是被挡掉的其他剧集角色数；`include_all=true` 看全项目。POST body 可带 `episode_id`（不带即项目级公共角色），唯一性按 `(episode_id, name)` 判定 |
+| GET/PATCH/DELETE | `/characters/{character_id}` | 详情 / 更新 / 归档。PATCH 为**局部更新**：未提供的字段一律不动（`CharacterUpdate` 全 `None` 默认）；DELETE 是软归档（`status=ARCHIVED`）。更新会写入 `user_edited=true`，之后的剧本同步不再覆盖这些字段 |
+| POST | `/episodes/{episode_id}/characters/sync` | 从该集**最新剧本的人物表**抓取角色，生成/补全**属于这一集**的角色卡（幂等）。同名角色在不同剧集各存一张，互不覆盖。query `force=true` 才用人物表整体覆盖手改内容；默认只补空字段。返回 `{episode_id, script_version, created, updated, kept, total, names, items}`。剧本生成任务结束时后端已自动调用过一次，此接口供「改完剧本重新抓」用 |
 | POST | `/characters/{character_id}/generate` | body `{asset_kinds:["setting","front","half_body","expression"], count_per_kind}` → Job |
 | POST | `/characters/{character_id}/confirm` | body `{media_id}` 确认主参考图 |
 | POST | `/characters/{character_id}/replace-primary` | body `{media_id, impact:"future_only"|"mark_stale"}`，返回受影响分镜列表 |
@@ -173,6 +177,8 @@
 | POST | `/episodes/{episode_id}/video/estimate` | body `{shot_nos:[...], params?}` → `{quote_id, provider, model, estimate_cents, quota_after_cents, estimated_wait_seconds, per_shot:[...], expires_at}` |
 | POST | `/episodes/{episode_id}/video/generate` | body `{shot_nos, params?, quote_id, idempotency_key, confirm:true}`；未确认成本 → `CONFLICT` |
 | POST | `/shots/{shot_id}/video/confirm` | body `{media_id}` |
+| POST | `/shots/{shot_id}/video/manual` | body `{media_id}`：用**已上传的视频**顶替该镜（先走 `POST /media/upload`，`kind=video` 且必须 `rights_declared=true`）。素材归到该镜头名下并直接置 `CONFIRMED`；返回 `duration_ms` 与 `warnings`（片段时长与剧本不一致时提示，合成按剧本时长裁剪）。用于「供应商已生成成功、本地拉取失败」时把片子捞回来，不必再生成一次 |
+| POST | `/shots/{shot_id}/video/fetch-provider` | body `{task_id}`：按供应商任务号补拉**已生成但本地没取回**的片段，不提交新任务、不计新费用。成功返回 `{shot_no, video_status, video_media_id, duration_ms, task_id, billed_cents, warnings}`；`billed_cents` 是按网关回执补记的历史成本。上游成片只保留 **24 小时**，过期返回「链接已过期，只能重新生成」。后台 worker 每 60 秒对「失败但已提交」的任务自动试一次（最多 6 次、间隔 5 分钟） |
 | POST | `/shots/{shot_id}/video/skip` | body `{reason?, fallback:"static_image"|"blank"}` |
 | POST | `/shots/{shot_id}/video/retry` | 新任务，关联原任务 |
 | GET | `/shots/{shot_id}/video` | 片段状态与历史 |
@@ -182,7 +188,7 @@
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET/POST | `/projects/{project_id}/voices` | 可用音色列表 / 新增（上传或供应商音色） |
-| POST | `/characters/{character_id}/voice` | body `{voice_id, speed?}` 绑定音色并设语速（`speed` 0.5~2.0，默认 1.0）；换音色或改语速都会把该角色已有配音标记过期。`GET /voices/{voice_id}/preview` 试听（返回 `{media_id, url}`，按需合成并缓存） |
+| POST | `/characters/{character_id}/voice` | body `{voice_id, speed?}` 绑定音色并设语速（`speed` 0.5~2.0，默认 1.0）；换音色或改语速都会把该角色已有配音标记过期。`GET /voices/{voice_id}/preview` 试听（返回 `{media_id, url}`，按需合成并缓存）。供应商产物下载对 403/404/429/5xx 会做 4 次短退避重试（网关刚返回 URL 时 OSS 偶发 403）；仍失败返回 **502**（带 OSS 错误码），不再伪装成 409「当前状态不允许该操作」。**音色实现方式**：认 `voice` 参数的供应商（MiniMax 等）直接切音色；通义 `qwen-audio-…-tts-next` 实测不认该字段（传任何值都是同一个女声），改由 `style_prompt` 指令前缀（如「用低沉浑厚的成年男声朗读：」）控制，该前缀不会被念出来 |
 | GET | `/episodes/{episode_id}/tts/estimate` | 配音预估 + 前置条件：query `shot_nos?`（逗号分隔）、`character_id?`；返回 `{estimate_cents, line_count, skipped_count, can_generate, blocking_problems:[{code:"MISSING_VOICE", character, shot_nos, message}], speaking_characters}` |
 | POST | `/episodes/{episode_id}/tts/generate` | body `{shot_nos?, character_id?}` → Job。**FR-050**：若存在「有台词但未绑定音色」的角色，返回 `409 MISSING_VOICE`（`details.blocking_problems` 给出角色与镜号），**不创建任务、不预留配额** |
 | GET | `/episodes/{episode_id}/tts` | 台词音频列表（含 `stale` 过期标记、`stale_count`、`skipped_count`、`manual_count`）；每条保留 `text`/`voice_id`/`speed`/`emotion`/`provider`/`source`（FR-051、§12-4） |
@@ -191,6 +197,9 @@
 | POST | `/episodes/{episode_id}/tts/skip` | **§12-4** 跳过配音继续出片：body `{shot_nos:[int], reason?}` → `{skipped_track_ids, counts}`。落成 `source="skipped"` 且 `media_id=null`，与 `missing` 明确区分 |
 | GET/POST | `/episodes/{episode_id}/bgm` | BGM/音效挂载：`{media_id, kind:"bgm"|"ambience"|"sfx", start_ms, end_ms, volume_db, fade_in_ms, fade_out_ms, rights_declared}` |
 | DELETE | `/episodes/{episode_id}/bgm/{track_id}` | 移除 |
+| GET | `/episodes/{episode_id}/bgm/estimate?seconds=30` | 氛围音估价：按**生成秒数**计费（`billing_unit:"second"`），返回 `estimate_cents / unit_price_cents / can_generate`。传 `shot_from`/`shot_to` 时按这段镜头的实际长度估价，`window` 里给出 `{shot_from, shot_to, shot_nos, start_ms, duration_ms}` |
+| GET | `/episodes/{episode_id}/bgm/suggest?shot_from=2&shot_to=3` | 按镜头内容拼一句氛围描述草稿（读分镜的 `image_prompt` 场景段 + `sfx` + `emotion`，**不调用模型、不扣费**）：`{prompt, shot_nos, seconds, sources:{scene,sfx,emotion,shots}}` |
+| POST | `/episodes/{episode_id}/bgm/generate` | 生成一轨氛围音/BGM（异步任务 `BGM_GENERATION`）：`{prompt, seconds:3~120, shot_no?, shot_from?, shot_to?, volume_db:-14, fade_in_ms, fade_out_ms}`。不传镜头 = 整集垫乐（kind=bgm，从 0 铺）；传 `shot_from`/`shot_to`（`shot_no` 是单镜简写）= 覆盖这段镜头（kind=ambience，起点取首镜、长度铺到末镜结束，可跨多个镜头共用一段）。提示词只写场景/乐器/情绪，**不要写台词**；同位置重复生成是替换，不会叠轨 |
 | POST | `/episodes/{episode_id}/subtitles/generate` | 生成字幕（依据确认台词与实际音频） |
 | GET | `/episodes/{episode_id}/subtitles` | 字幕条目 JSON |
 | GET | `/episodes/{episode_id}/subtitles/export?format=srt|vtt` | 纯文本下载 |
@@ -199,7 +208,7 @@
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/episodes/{episode_id}/workflow/start` | 创建 WorkflowRun 并跑到首个门控 |
+| POST | `/episodes/{episode_id}/workflow/start` | 创建 WorkflowRun 并跑到首个门控。body `{auto_run?:true, reuse_script?:bool}`：`reuse_script` 省略时「已有可用剧本（`story_json.shots` 非空）就复用」，不再调用模型重新生成（不额外扣费、不覆盖手改）；显式传 `false` 才重新生成 |
 | GET | `/episodes/{episode_id}/workflow` | 当前 run：`{id, status, current_node, checkpoint_id, pending_gate, state, updated_at}` |
 | POST | `/episodes/{episode_id}/workflow/resume` | body `{workflow_run_id, checkpoint_id, gate, decision:"approve"|"reject"|"edit", payload?, target_version?}`；版本不一致返回 `CHECKPOINT_STALE` |
 | POST | `/episodes/{episode_id}/workflow/retry` | body `{node}` 重跑失败节点 |
@@ -261,7 +270,7 @@ data: {"job_id":"job_...","status":"RUNNING","progress":40,"episode_id":"epi_...
 | GET | `/episodes/{episode_id}/export-gate` | **§12-8** 导出闸门：`{can_export, blocked:[media_id], unresolved:[media_id], pending, rejected, approved, appeals:[SafetyAppeal], aigc}`。`unresolved` 是「被拦截且未获人工批准」的素材，前端据此禁用导出按钮并展示申诉入口 |
 | POST | `/episodes/{episode_id}/appeals` | **§12-8** 提交内容拦截申诉：body `{target_type:"asset"\|"input"\|"episode", target_id?, reason（必填）, detail?}` → 201 `SafetyAppeal`（`status:"PENDING"`）。`target_type="asset"` 时要求该素材确实为 `BLOCKED`（否则 `409`），同一目标只允许一条待审申诉（重复提交 `409`）。**提交本身不解禁** |
 | GET | `/episodes/{episode_id}/appeals` | 本集申诉列表 → `{items, pending, approved, rejected}` |
-| POST | `/episodes/{episode_id}/render/preview` | 生成低码率预览 MP4 → Job。**§12-8**：存在未解决拦截时 `422 SAFETY_BLOCKED`（`details` 为闸门状态） |
+| POST | `/episodes/{episode_id}/render/preview` | 生成低码率预览 MP4 → Job。body `{watermark?, partial?}`：`partial=true` 时只合成**已就绪**镜头（有画面/视频），未就绪镜头从时间线剔除、字幕/BGM 按新起点重映射，产物 manifest 带 `partial:true`；正式导出仍走完整校验。**§12-8**：存在未解决拦截时 `422 SAFETY_BLOCKED`（`details` 为闸门状态） |
 | POST | `/episodes/{episode_id}/render/export` | 正式导出 body `{preset:"720p_9x16"\|"1080p_9x16", watermark:false}` → Job。**§12-8**：同上前置拦截 |
 | GET | `/episodes/{episode_id}/exports` | 导出记录 |
 | GET | `/exports/{export_id}` | 导出详情 `{status, kind, media_id, url, error, manifest}` |
@@ -292,7 +301,7 @@ episode_<no>_package.zip
 | --- | --- | --- |
 | GET | `/cost/ledger` | `?episode_id=&project_id=&kind=&page=` 成本流水 |
 | GET | `/cost/summary` | `?episode_id=` 汇总 |
-| GET | `/quota` | `{limit_cents, used_cents, reserved_cents, remaining_cents, concurrent_limit, running_jobs}` |
+| GET | `/quota` | `{limit_cents, used_cents, reserved_cents, remaining_cents, concurrent_limit, running_jobs}` + **积分口径** `{limit_credits, used_credits, reserved_credits, remaining_credits, cents_per_credit}`。内部账本仍用「分」，积分只在展示层换算：1 积分 = `CREDIT_USD_VALUE`(默认 $0.005) × `USD_CNY_RATE` ≈ 3.6 分。总配额可用 `QUOTA_LIMIT_CREDITS` 直接按供应商积分填 |
 
 ## 14. 供应商设置与安全
 

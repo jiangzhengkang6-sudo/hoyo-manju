@@ -207,15 +207,13 @@ onMounted(load)
             <p v-else class="hint">显示名保存后立即生效，其它页面与导出记录都会使用它。</p>
           </div>
 
-          <div class="wi-meta">
-            <div class="wi-meta-item">
-              <span class="tiny dim">工作区 ID</span>
-              <span class="mono ws-id">{{ profile.workspace_id }}</span>
-            </div>
-            <div class="wi-meta-item">
-              <span class="tiny dim">用户 ID</span>
-              <span class="mono tiny">{{ profile.user.id }}</span>
-            </div>
+          <!-- 工作区 / 用户 id 是内部标识，默认不铺在界面上，只在悬停时给出 -->
+          <div
+            class="wi-meta"
+            :title="`工作区 ${profile.workspace_id} · 用户 ${profile.user.id}`"
+          >
+            <span class="badge badge-muted badge-dot">本地工作区</span>
+            <span class="tiny dim">单人使用 · 项目均归属同一工作区</span>
           </div>
         </div>
 
@@ -304,24 +302,6 @@ onMounted(load)
 </template>
 
 <style scoped>
-.page {
-  padding: 24px;
-  display: flex;
-  flex-direction: column;
-  gap: var(--gap-lg);
-  max-width: 1400px;
-}
-.page-head {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 16px;
-  flex-wrap: wrap;
-}
-.page-head p {
-  margin-top: 4px;
-  max-width: 620px;
-}
 .sec-head {
   margin-bottom: 10px;
 }
@@ -330,14 +310,14 @@ onMounted(load)
 .notice {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
-  padding: 12px 14px;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
   border-radius: var(--radius);
   border: 1px solid var(--line);
 }
 .notice-warn {
-  border-color: rgba(251, 191, 36, 0.35);
-  background: linear-gradient(180deg, rgba(251, 191, 36, 0.08), rgba(251, 191, 36, 0.02));
+  border-color: rgba(232, 203, 109, 0.35);
+  background: linear-gradient(180deg, rgba(232, 203, 109, 0.08), rgba(232, 203, 109, 0.02));
 }
 .notice-mark {
   width: 20px;
@@ -345,11 +325,11 @@ onMounted(load)
   border-radius: 50%;
   display: grid;
   place-items: center;
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 700;
   background: var(--warn-soft);
   color: var(--warn);
-  border: 1px solid rgba(251, 191, 36, 0.4);
+  border: 1px solid rgba(232, 203, 109, 0.4);
   flex: 0 0 auto;
   margin-top: 1px;
 }
@@ -357,13 +337,13 @@ onMounted(load)
   min-width: 0;
 }
 .notice-title {
-  font-size: 13px;
+  font-size: var(--fs-13);
   font-weight: 650;
   color: var(--warn);
 }
 .notice-text {
   margin-top: 3px;
-  font-size: 12.5px;
+  font-size: var(--fs-12);
   line-height: 1.6;
   color: var(--text-1);
 }
@@ -376,29 +356,29 @@ onMounted(load)
 .ws-identity {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: var(--space-4);
 }
 .wi-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 20px;
+  gap: var(--space-5);
   flex-wrap: wrap;
 }
 .wi-name-block {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-2);
   min-width: 0;
 }
 .wi-name-row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-3);
   flex-wrap: wrap;
 }
 .wi-name {
-  font-size: 22px;
+  font-size: var(--fs-24);
   font-weight: 680;
   letter-spacing: -0.01em;
   overflow: hidden;
@@ -409,35 +389,35 @@ onMounted(load)
 .wi-edit {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   flex-wrap: wrap;
 }
 .wi-input {
   width: 260px;
 }
 .wi-saved {
-  font-size: 11.5px;
+  font-size: var(--fs-11);
   color: var(--ok);
 }
 .wi-meta {
   display: flex;
-  gap: 22px;
+  gap: var(--space-6);
   flex-wrap: wrap;
 }
 .wi-meta-item {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--space-1);
 }
 .ws-id {
-  font-size: 14px;
+  font-size: var(--fs-14);
   font-weight: 600;
   color: var(--text-0);
 }
 .wi-defaults {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   flex-wrap: wrap;
   padding-top: 12px;
   border-top: 1px solid var(--line);
@@ -447,14 +427,14 @@ onMounted(load)
 .quota-grid {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 14px;
+  gap: var(--space-1) 14px;
   margin-top: 8px;
   color: var(--text-2);
 }
 .wi-concurrent {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: var(--space-2);
   margin-top: 10px;
 }
 .wi-danger {

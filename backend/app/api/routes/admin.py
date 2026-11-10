@@ -13,8 +13,9 @@ from app.core.security import (
     mask_secret,
 )
 from app.db.models import PriceBook, ProviderSetting, User
+from app.providers.base import ProviderKind
 from app.providers.http_providers import PRICE_TABLE
-from app.providers.registry import describe_all
+from app.providers.registry import describe_all, resolve
 from app.schemas import AppealResolveIn, ProvidersUpdateIn, QuotaAdjustIn, SafetyCheckIn
 from app.services import audit as audit_service
 from app.services import cost as cost_service
@@ -114,13 +115,21 @@ def read_providers(session: SessionDep) -> dict:
     items = []
     for kind in PROVIDER_KINDS:
         row = rows.get(kind)
+        # 「是否可用」要看**实际解析到的供应商**：密钥写在 .env 里也算配置好了，
+        # 只查数据库行会把 deepseek / qwen 这类 env 驱动的供应商误报成「未配置」。
+        try:
+            provider = resolve(ProviderKind(kind), session)
+            provider_configured = provider.configured()
+            effective_model = getattr(provider, "model", "") or ""
+        except Exception:  # noqa: BLE001 - 解析失败不影响列表展示
+            provider_configured, effective_model = False, ""
         items.append(
             {
                 "kind": kind,
                 "provider": row.provider if row else getattr(settings, f"{kind}_provider"),
-                "model": row.model if row else "",
+                "model": (row.model if row and row.model else effective_model),
                 "base_url": row.base_url if row else "",
-                "configured": bool(row and row.api_key_encrypted),
+                "configured": provider_configured or bool(row and row.api_key_encrypted),
                 "masked": row.api_key_masked if row else "",
                 "is_primary": row.is_primary if row else True,
                 # FR-090 备用供应商（密钥同样只回传掩码）

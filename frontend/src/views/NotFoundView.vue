@@ -19,7 +19,7 @@ import EmptyState from '@/components/EmptyState.vue'
 
 <style scoped>
 .page {
-  padding: 60px 24px;
+  padding: var(--space-6) var(--space-6);
   display: grid;
   place-items: center;
   min-height: 60vh;
